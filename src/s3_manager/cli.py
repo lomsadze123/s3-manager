@@ -5,13 +5,20 @@ The actual S3 work is done in buckets.py, objects.py and policies.py.
 """
 
 import json
+import logging
+import sys
 from pathlib import Path
 from typing import Annotated, Optional
 
+import requests
 import typer
+from boto3.exceptions import S3UploadFailedError
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, ParamValidationError
 
 from s3_manager import buckets, objects, policies
 from s3_manager.client import init_client
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     help="A simple CLI tool for working with S3-compatible storage.",
@@ -25,6 +32,63 @@ policy_app = typer.Typer(help="Generate, apply and read bucket policies.", no_ar
 app.add_typer(bucket_app, name="bucket")
 app.add_typer(object_app, name="object")
 app.add_typer(policy_app, name="policy")
+
+# Friendlier messages for common AWS error codes.
+AWS_ERROR_MESSAGES = {
+    "NoSuchBucket": "The bucket does not exist.",
+    "NoSuchKey": "The object does not exist.",
+    "BucketAlreadyExists": "This bucket name is already taken by another AWS account.",
+    "BucketAlreadyOwnedByYou": "You already own a bucket with this name.",
+    "BucketNotEmpty": "The bucket is not empty. Delete its objects first.",
+    "InvalidBucketName": "Invalid bucket name. Use 3-63 lowercase letters, digits and hyphens.",
+    "AccessDenied": "Access denied. Check your permissions and the bucket's Block Public Access settings.",
+    "403": "Access denied. The bucket may belong to another AWS account.",
+    "InvalidAccessKeyId": "The AWS access key ID is invalid. Check your .env file.",
+    "SignatureDoesNotMatch": "The AWS secret access key is wrong. Check your .env file.",
+    "AccessControlListNotSupported": "This bucket does not allow ACLs. Create it with --enable-acl.",
+    "MalformedPolicy": "The bucket policy is not valid.",
+}
+
+
+@app.callback()
+def configure(
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show debug logs.")] = False,
+):
+    """A simple CLI tool for working with S3-compatible storage."""
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    logging.getLogger("s3_manager").setLevel(logging.DEBUG if verbose else logging.INFO)
+
+
+def describe_aws_error(error):
+    code = error.response["Error"].get("Code", "Unknown")
+    message = AWS_ERROR_MESSAGES.get(code) or error.response["Error"].get("Message") or "AWS request failed."
+    return f"{message} ({code})"
+
+
+def fail(message):
+    logger.error(message)
+    logger.debug("Details:", exc_info=True)
+    sys.exit(1)
+
+
+def main():
+    """Entry point: run the CLI and turn known errors into short messages."""
+    try:
+        app()
+    except ClientError as error:
+        fail(describe_aws_error(error))
+    except NoCredentialsError:
+        fail("AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in .env.")
+    except ParamValidationError:
+        fail("Invalid input (check the bucket name). Run with --verbose for details.")
+    except (BotoCoreError, S3UploadFailedError) as error:
+        fail(str(error))
+    except requests.HTTPError as error:
+        fail(f"Download failed: {error}")
+    except requests.RequestException as error:
+        fail(f"Download failed: could not reach the URL ({type(error).__name__}).")
+    except ValueError as error:
+        fail(str(error))
 
 
 # ---------- bucket commands ----------

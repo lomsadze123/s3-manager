@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-s3-manager = "s3_manager.cli:app"
+s3-manager = "s3_manager.cli:main"
 
 [tool.poetry]
 packages = [{include = "s3_manager", from = "src"}]
