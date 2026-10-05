@@ -9,6 +9,9 @@ from typing import Annotated, Optional
 
 import typer
 
+from s3_manager import buckets
+from s3_manager.client import init_client
+
 app = typer.Typer(
     help="A simple CLI tool for working with S3-compatible storage.",
     no_args_is_help=True,
@@ -28,7 +31,11 @@ app.add_typer(policy_app, name="policy")
 @bucket_app.command("list")
 def bucket_list():
     """List all buckets."""
-    typer.echo("TODO: list buckets")
+    names = buckets.list_buckets(init_client())
+    if not names:
+        typer.echo("No buckets found.")
+    for name in names:
+        typer.echo(name)
 
 
 @bucket_app.command("create")
@@ -39,7 +46,8 @@ def bucket_create(
     ] = False,
 ):
     """Create a new bucket."""
-    typer.echo(f"TODO: create bucket '{name}' (enable_acl={enable_acl})")
+    buckets.create_bucket(init_client(), name, enable_acl=enable_acl)
+    typer.echo(f"Bucket '{name}' created.")
 
 
 @bucket_app.command("delete")
@@ -48,7 +56,10 @@ def bucket_delete(
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ):
     """Delete an (empty) bucket."""
-    typer.echo(f"TODO: delete bucket '{name}' (yes={yes})")
+    if not yes:
+        typer.confirm(f"Really delete bucket '{name}'?", abort=True)
+    buckets.delete_bucket(init_client(), name)
+    typer.echo(f"Bucket '{name}' deleted.")
 
 
 @bucket_app.command("exists")
@@ -56,7 +67,11 @@ def bucket_exists_cmd(
     name: Annotated[str, typer.Argument(help="Name of the bucket to check.")],
 ):
     """Check whether a bucket exists."""
-    typer.echo(f"TODO: check if bucket '{name}' exists")
+    if buckets.bucket_exists(init_client(), name):
+        typer.echo(f"Bucket '{name}' exists.")
+    else:
+        typer.echo(f"Bucket '{name}' does not exist.")
+        raise typer.Exit(code=1)
 
 
 # ---------- object commands ----------
