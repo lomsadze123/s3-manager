@@ -9,7 +9,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from s3_manager import buckets
+from s3_manager import buckets, objects
 from s3_manager.client import init_client
 
 app = typer.Typer(
@@ -78,14 +78,17 @@ def bucket_exists_cmd(
 
 @object_app.command("upload")
 def object_upload(
-    path: Annotated[Path, typer.Argument(help="Local file to upload.")],
+    path: Annotated[
+        Path, typer.Argument(help="Local file to upload.", exists=True, dir_okay=False)
+    ],
     bucket: Annotated[str, typer.Argument(help="Target bucket.")],
     key: Annotated[
         Optional[str], typer.Option(help="Object key in S3. Defaults to the file name.")
     ] = None,
 ):
     """Upload a local file to a bucket."""
-    typer.echo(f"TODO: upload '{path}' to '{bucket}' (key={key})")
+    key = objects.upload_file(init_client(), path, bucket, key=key)
+    typer.echo(f"Uploaded to s3://{bucket}/{key}")
 
 
 @object_app.command("upload-url")
@@ -97,7 +100,8 @@ def object_upload_url(
     ] = None,
 ):
     """Download a file from a URL and upload it to a bucket."""
-    typer.echo(f"TODO: download '{url}' and upload to '{bucket}' (key={key})")
+    key = objects.download_file_and_upload_to_s3(init_client(), url, bucket, key=key)
+    typer.echo(f"Uploaded to s3://{bucket}/{key}")
 
 
 @object_app.command("set-acl")
