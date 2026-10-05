@@ -4,12 +4,13 @@ This module only handles user interaction (arguments, prompts, output).
 The actual S3 work is done in buckets.py, objects.py and policies.py.
 """
 
+import json
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
-from s3_manager import buckets, objects
+from s3_manager import buckets, objects, policies
 from s3_manager.client import init_client
 
 app = typer.Typer(
@@ -111,7 +112,8 @@ def object_set_acl(
     acl: Annotated[str, typer.Option(help="ACL to apply: 'public-read' or 'private'.")] = "public-read",
 ):
     """Set the access ACL of a single object."""
-    typer.echo(f"TODO: set ACL '{acl}' on '{bucket}/{key}'")
+    objects.set_object_access_policy(init_client(), bucket, key, acl=acl)
+    typer.echo(f"ACL of s3://{bucket}/{key} set to '{acl}'.")
 
 
 # ---------- policy commands ----------
@@ -121,7 +123,8 @@ def policy_generate(
     bucket: Annotated[str, typer.Argument(help="Bucket the policy is for.")],
 ):
     """Print a public-read bucket policy as JSON (does not apply it)."""
-    typer.echo(f"TODO: generate public-read policy for '{bucket}'")
+    policy = policies.generate_public_read_policy(bucket)
+    typer.echo(json.dumps(policy, indent=2))
 
 
 @policy_app.command("create")
@@ -129,7 +132,8 @@ def policy_create(
     bucket: Annotated[str, typer.Argument(help="Bucket to apply the policy to.")],
 ):
     """Apply a public-read bucket policy."""
-    typer.echo(f"TODO: apply public-read policy to '{bucket}'")
+    policies.create_bucket_policy(init_client(), bucket)
+    typer.echo(f"Public-read policy applied to '{bucket}'.")
 
 
 @policy_app.command("get")
@@ -137,7 +141,11 @@ def policy_get(
     bucket: Annotated[str, typer.Argument(help="Bucket to read the policy from.")],
 ):
     """Show the current bucket policy."""
-    typer.echo(f"TODO: read policy of '{bucket}'")
+    policy = policies.read_bucket_policy(init_client(), bucket)
+    if policy is None:
+        typer.echo(f"Bucket '{bucket}' has no policy.")
+    else:
+        typer.echo(json.dumps(policy, indent=2))
 
 
 @policy_app.command("set-public")
@@ -145,4 +153,7 @@ def policy_set_public(
     bucket: Annotated[str, typer.Argument(help="Bucket to make public.")],
 ):
     """Turn off Block Public Access and apply a public-read policy."""
-    typer.echo(f"TODO: make '{bucket}' public")
+    client = init_client()
+    policies.disable_block_public_access(client, bucket)
+    policies.create_bucket_policy(client, bucket)
+    typer.echo(f"Bucket '{bucket}' is now publicly readable.")

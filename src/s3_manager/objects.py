@@ -11,6 +11,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
+ALLOWED_ACLS = ("private", "public-read")
 
 
 def upload_file(client, path, bucket, key=None):
@@ -48,3 +49,17 @@ def download_file_and_upload_to_s3(client, url, bucket, key=None):
     )
     logger.info("Upload finished.")
     return key
+
+
+def set_object_access_policy(client, bucket, key, acl="public-read"):
+    """Set a canned ACL ("private" or "public-read") on a single object.
+
+    Only works on buckets created with ACLs enabled (ObjectOwnership="ObjectWriter")
+    and with Block Public Access turned off (for "public-read").
+    """
+    if acl not in ALLOWED_ACLS:
+        raise ValueError(f"ACL must be one of {', '.join(ALLOWED_ACLS)}, got '{acl}'.")
+
+    logger.info("Setting ACL '%s' on s3://%s/%s...", acl, bucket, key)
+    client.put_object_acl(Bucket=bucket, Key=key, ACL=acl)
+    logger.info("ACL updated.")
