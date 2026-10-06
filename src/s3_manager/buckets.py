@@ -50,3 +50,16 @@ def bucket_exists(client, name):
         if error.response["Error"]["Code"] in ("404", "NoSuchBucket"):
             return False
         raise
+
+
+def ensure_bucket(client, name, enable_acl=False):
+    """Create the bucket only if it does not exist yet.
+
+    Returns True if the bucket was created, False if it already existed.
+    """
+    if bucket_exists(client, name):
+        logger.info("Bucket '%s' already exists, skipping creation.", name)
+        return False
+
+    create_bucket(client, name, enable_acl=enable_acl)
+    return True

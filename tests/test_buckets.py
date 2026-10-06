@@ -1,7 +1,7 @@
 import pytest
 from botocore.exceptions import ClientError
 
-from s3_manager.buckets import bucket_exists, create_bucket, list_buckets
+from s3_manager.buckets import bucket_exists, create_bucket, ensure_bucket, list_buckets
 from tests.conftest import make_client_error
 
 
@@ -40,3 +40,20 @@ def test_bucket_exists_raises_on_access_denied(client):
 
     with pytest.raises(ClientError):
         bucket_exists(client, "someone-elses-bucket")
+
+
+def test_ensure_bucket_skips_existing_bucket(client):
+    assert ensure_bucket(client, "my-bucket") is False
+
+    client.create_bucket.assert_not_called()
+
+
+def test_ensure_bucket_creates_missing_bucket(client):
+    client.head_bucket.side_effect = make_client_error("404")
+
+    assert ensure_bucket(client, "my-bucket") is True
+
+    client.create_bucket.assert_called_once_with(
+        Bucket="my-bucket",
+        CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
+    )

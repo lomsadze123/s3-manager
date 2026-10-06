@@ -139,6 +139,20 @@ def bucket_exists_cmd(
         raise typer.Exit(code=1)
 
 
+@bucket_app.command("ensure")
+def bucket_ensure(
+    name: Annotated[str, typer.Argument(help="Name of the bucket to check or create.")],
+    enable_acl: Annotated[
+        bool, typer.Option("--enable-acl", help="Allow object ACLs if the bucket gets created.")
+    ] = False,
+):
+    """Create a bucket only if it does not exist yet."""
+    if buckets.ensure_bucket(init_client(), name, enable_acl=enable_acl):
+        typer.echo(f"Bucket '{name}' did not exist, so it was created.")
+    else:
+        typer.echo(f"Bucket '{name}' already exists.")
+
+
 # ---------- object commands ----------
 
 @object_app.command("upload")
