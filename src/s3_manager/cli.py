@@ -199,9 +199,13 @@ def object_set_acl(
 @policy_app.command("generate-public-read")
 def policy_generate(
     bucket: Annotated[str, typer.Argument(help="Bucket the policy is for.")],
+    prefix: Annotated[
+        Optional[list[str]],
+        typer.Option(help="Only make this folder public (repeatable). Default: whole bucket."),
+    ] = None,
 ):
     """Print a public-read bucket policy as JSON (does not apply it)."""
-    policy = policies.generate_public_read_policy(bucket)
+    policy = policies.generate_public_read_policy(bucket, prefix)
     typer.echo(json.dumps(policy, indent=2))
 
 
@@ -224,6 +228,21 @@ def policy_get(
         typer.echo(f"Bucket '{bucket}' has no policy.")
     else:
         typer.echo(json.dumps(policy, indent=2))
+
+
+@policy_app.command("ensure")
+def policy_ensure(
+    bucket: Annotated[str, typer.Argument(help="Bucket to check.")],
+    prefix: Annotated[
+        list[str], typer.Option(help="Folder to make public (repeatable).")
+    ] = ["dev", "test"],
+):
+    """If the bucket has no policy, make objects under the given folders publicly readable."""
+    if policies.ensure_bucket_policy(init_client(), bucket, prefix):
+        folders = ", ".join(f"{p.strip('/')}/" for p in prefix)
+        typer.echo(f"Bucket '{bucket}' had no policy. Applied public-read policy for: {folders}")
+    else:
+        typer.echo(f"Bucket '{bucket}' already has a policy. Nothing changed.")
 
 
 @policy_app.command("set-public")
