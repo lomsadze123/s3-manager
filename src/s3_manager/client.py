@@ -20,7 +20,8 @@ def init_client():
     Environment variables:
         AWS_ACCESS_KEY_ID      - access key (required unless using an AWS profile)
         AWS_SECRET_ACCESS_KEY  - secret key (required unless using an AWS profile)
-        AWS_REGION             - region, e.g. "eu-central-1" (default: us-east-1)
+        AWS_SESSION_TOKEN      - optional, only for temporary credentials (e.g. AWS Academy labs)
+        AWS_REGION            - region, e.g. "eu-central-1" (default: us-east-1)
         S3_ENDPOINT_URL        - optional, for S3-compatible services (MinIO, LocalStack)
     """
     load_dotenv(find_dotenv(usecwd=True))
@@ -34,6 +35,7 @@ def init_client():
         "s3",
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        aws_session_token=os.getenv("AWS_SESSION_TOKEN") or None,
         region_name=region,
         endpoint_url=endpoint_url,
     )
