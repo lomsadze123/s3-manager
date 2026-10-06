@@ -120,10 +120,14 @@ def bucket_delete(
     name: Annotated[str, typer.Argument(help="Name of the bucket to delete.")],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ):
-    """Delete an (empty) bucket."""
+    """Delete an (empty) bucket if it exists."""
+    client = init_client()
+    if not buckets.bucket_exists(client, name):
+        typer.echo(f"Bucket '{name}' does not exist. Nothing to delete.")
+        return
     if not yes:
         typer.confirm(f"Really delete bucket '{name}'?", abort=True)
-    buckets.delete_bucket(init_client(), name)
+    buckets.delete_bucket(client, name)
     typer.echo(f"Bucket '{name}' deleted.")
 
 
