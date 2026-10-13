@@ -200,6 +200,35 @@ def bucket_versioning(
         typer.echo(VERSIONING_MESSAGES[buckets.get_bucket_versioning(client, name)].format(name=name))
 
 
+@bucket_app.command("organize")
+def bucket_organize(
+    name: Annotated[str, typer.Argument(help="Name of the bucket.")],
+    by_extension: Annotated[
+        bool,
+        typer.Option(
+            "-ext", "--by-extension", help="Move each file into a folder named after its extension."
+        ),
+    ] = False,
+):
+    """Move the files in the bucket root into folders by extension with -ext
+    (image.jpg -> jpg/image.jpg) and show how many files were moved per extension."""
+    if not by_extension:
+        typer.echo("Pass -ext to move the files into folders named after their extension.")
+        raise typer.Exit(code=1)
+
+    client = init_client()
+    if not buckets.bucket_exists(client, name):
+        typer.echo(f"Bucket '{name}' does not exist.")
+        raise typer.Exit(code=1)
+
+    counts = objects.organize_by_extension(client, name)
+    if not counts:
+        typer.echo("Nothing to organize: no files with an extension in the bucket root.")
+        return
+    for extension, count in sorted(counts.items()):
+        typer.echo(f"{extension} - {count}")
+
+
 # ---------- object commands ----------
 
 @object_app.command("upload")

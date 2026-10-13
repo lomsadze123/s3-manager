@@ -1,9 +1,10 @@
-"""Object operations: uploading, inspecting and deleting files, and setting object access."""
+"""Object operations: uploading, inspecting, moving and deleting files, and setting object access."""
 
 import io
 import logging
 import math
 import mimetypes
+from collections import Counter
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -304,3 +305,56 @@ def restore_previous_version(client, bucket, key):
     )
     logger.info("New version created.")
     return previous, response.get("VersionId")
+
+
+def extension_folder(key):
+    """Return the folder name for a key: its extension in lowercase, without the dot.
+
+    Returns None for keys that are already inside a folder (they contain "/") and for keys
+    without an extension (e.g. "README" or ".env"), because those are not moved.
+    """
+    if "/" in key:
+        return None
+    suffix = Path(key).suffix
+    return suffix[1:].lower() or None
+
+
+def move_object(client, bucket, key, new_key):
+    """Move an object to a new key in the same bucket.
+
+    S3 has no "move" or "rename": the object is copied to the new key with copy_object (done
+    inside S3, nothing is downloaded, Content-Type is kept) and the old key is deleted.
+    copy_object works for objects up to 5 GiB.
+    """
+    logger.info("Moving s3://%s/%s to %s...", bucket, key, new_key)
+    client.copy_object(Bucket=bucket, Key=new_key, CopySource={"Bucket": bucket, "Key": key})
+    client.delete_object(Bucket=bucket, Key=key)
+
+
+def organize_by_extension(client, bucket):
+    """Move every file in the bucket root into a folder named after its extension.
+
+    image.jpg -> jpg/image.jpg, demo.csv -> csv/demo.csv. Objects already inside a folder and
+    files without an extension are left alone, so running it again changes nothing.
+    Returns a Counter with the number of moved files per extension, e.g. {"csv": 2, "jpg": 1}.
+
+    If a key like csv/demo.csv already exists it is overwritten. In a versioned bucket the old
+    key only gets a delete marker, its versions are kept.
+    """
+    # Delimiter="/" makes S3 return only root-level keys in "Contents" (keys inside folders are
+    # grouped under "CommonPrefixes"). All keys are listed first, so the moved ones are not
+    # listed again while moving.
+    keys = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Delimiter="/"):
+        keys.extend(item["Key"] for item in page.get("Contents", []))
+
+    counts = Counter()
+    for key in keys:
+        folder = extension_folder(key)
+        if folder is None:
+            logger.info("Skipping '%s': it has no extension.", key)
+            continue
+        move_object(client, bucket, key, f"{folder}/{key}")
+        counts[folder] += 1
+    return counts

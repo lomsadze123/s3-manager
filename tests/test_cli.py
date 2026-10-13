@@ -215,3 +215,46 @@ def test_object_file_rejects_two_flags(client):
     assert result.exit_code == 1
     assert "only one of" in result.output
     client.delete_object.assert_not_called()
+
+
+def fake_root_keys(client, *keys):
+    client.get_paginator.return_value.paginate.return_value = [
+        {"Contents": [{"Key": key} for key in keys]}
+    ]
+
+
+def test_bucket_organize_shows_count_per_extension(client):
+    fake_root_keys(client, "image.jpg", "demo.csv", "users.csv")
+
+    result = runner.invoke(cli.app, ["bucket", "organize", "my-bucket", "-ext"])
+
+    assert result.exit_code == 0
+    assert result.output.splitlines() == ["csv - 2", "jpg - 1"]
+    assert client.copy_object.call_count == 3
+
+
+def test_bucket_organize_needs_ext_flag(client):
+    result = runner.invoke(cli.app, ["bucket", "organize", "my-bucket"])
+
+    assert result.exit_code == 1
+    assert "Pass -ext" in result.output
+    client.copy_object.assert_not_called()
+
+
+def test_bucket_organize_reports_missing_bucket(client):
+    client.head_bucket.side_effect = make_client_error("404")
+
+    result = runner.invoke(cli.app, ["bucket", "organize", "missing-bucket", "-ext"])
+
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
+    client.copy_object.assert_not_called()
+
+
+def test_bucket_organize_reports_nothing_to_move(client):
+    fake_root_keys(client, "README")
+
+    result = runner.invoke(cli.app, ["bucket", "organize", "my-bucket", "--by-extension"])
+
+    assert result.exit_code == 0
+    assert "Nothing to organize" in result.output

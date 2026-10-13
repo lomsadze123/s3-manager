@@ -28,6 +28,9 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   turn it on or suspend it, list the versions of a file with their creation dates
   (`object file BUCKET KEY -ver`), and upload the second-to-last version again as a new version
   (`object file BUCKET KEY -rp`)
+- **Organize by extension:** pass the bucket and the `-ext` flag (`bucket organize NAME -ext`) to
+  move every file into a folder named after its extension (`image.jpg` → `jpg/image.jpg`,
+  `demo.csv` → `csv/demo.csv`) and print how many files were moved per extension (`csv - 2`)
 - **Configuration** through a `.env` file (credentials are never stored in the code)
 - **Logging** of every operation, with a `--verbose` mode for debugging
 - **Readable errors** instead of Python tracebacks (e.g. `ERROR: The bucket does not exist. (NoSuchBucket)`)
@@ -143,7 +146,14 @@ poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -ver   #
 poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -rp    # photo.jpg is the latest again
 poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -ver   # 3 versions
 
-# 7. clean up (the bucket must be empty before deleting)
+# 7. sort the files in the bucket root into folders by extension
+poetry run s3-manager object upload ./image.jpg my-unique-bucket-2026
+poetry run s3-manager object upload ./demo.csv my-unique-bucket-2026
+poetry run s3-manager object upload ./users.csv my-unique-bucket-2026
+poetry run s3-manager bucket organize my-unique-bucket-2026 -ext   # csv - 2, jpg - 1
+poetry run s3-manager bucket organize my-unique-bucket-2026 -ext   # nothing left to move
+
+# 8. clean up (the bucket must be empty before deleting)
 poetry run s3-manager bucket delete my-unique-bucket-2026
 ```
 
@@ -192,6 +202,13 @@ Object 's3://my-unique-bucket-2026/dev/photo.jpg' deleted.
 $ poetry run s3-manager object file my-unique-bucket-2026 dev/photo.jpg -del
 Object 's3://my-unique-bucket-2026/dev/photo.jpg' does not exist. Nothing to delete.
 
+$ poetry run s3-manager bucket organize my-unique-bucket-2026 -ext
+INFO: Moving s3://my-unique-bucket-2026/demo.csv to csv/demo.csv...
+INFO: Moving s3://my-unique-bucket-2026/image.jpg to jpg/image.jpg...
+INFO: Moving s3://my-unique-bucket-2026/users.csv to csv/users.csv...
+csv - 2
+jpg - 1
+
 $ poetry run s3-manager object upload-url https://www.python.org/ my-unique-bucket-2026
 INFO: Downloading https://www.python.org/...
 INFO: Downloaded 52508 bytes, detected type: text/html.
@@ -218,6 +235,7 @@ command: `s3-manager -v bucket list`.
 | `bucket delete NAME [-y]` | Delete an empty bucket if it exists, otherwise report that it does not exist. Asks for confirmation unless `-y` is given. |
 | `bucket exists NAME` | Check if a bucket exists (exit code `0` = yes, `1` = no) |
 | `bucket versioning NAME [-vs\|--status] [--enable\|--suspend]` | `-vs`: show whether versioning is enabled, suspended or was never enabled. `--enable` / `--suspend` change it first. |
+| `bucket organize NAME [-ext\|--by-extension]` | With `-ext`: move every file in the bucket root into a folder named after its extension (`image.jpg` → `jpg/image.jpg`) and print the number of moved files per extension (`csv - 2`). Files already in a folder and files without an extension are left alone. Without the flag: show a hint (exit code `1`). |
 | `object upload PATH BUCKET [--key KEY] [--method auto\|small\|large] [--threshold-mb 100] [--part-size-mb 10] [--validate-mime]` | Upload a local file. Key defaults to the file name. `auto` uses a multipart upload for files of at least `--threshold-mb`, otherwise one request. `--validate-mime` only accepts the media types listed below. |
 | `object upload-url URL BUCKET [--key KEY]` | Download a file from a URL and upload it to S3. Only `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp`, `.mp4` are accepted. |
 | `object set-acl BUCKET KEY [--acl public-read\|private]` | Set the ACL of one object |
@@ -304,7 +322,8 @@ s3-manager/
 │   ├── buckets.py     # list_buckets, create_bucket, delete_bucket, bucket_exists,
 │   │                  # get_bucket_versioning, set_bucket_versioning
 │   ├── objects.py     # upload_file (small / large), download_file_and_upload_to_s3, set_object_access_policy,
-│   │                  # get_object_info, delete_object, list_object_versions, restore_previous_version
+│   │                  # get_object_info, delete_object, list_object_versions, restore_previous_version,
+│   │                  # extension_folder, move_object, organize_by_extension
 │   ├── policies.py    # generate_public_read_policy, create_bucket_policy, read_bucket_policy
 │   └── lifecycle.py   # set_lifecycle_policy, read_lifecycle_policy, delete_lifecycle_policy
 ├── tests/             # pytest unit tests for each module and the CLI (no AWS account needed)
@@ -427,6 +446,26 @@ returns the newest one (`IsLatest`).
   version, so all older versions stay and the step can be undone. `copy_object` works for objects
   up to 5 GiB. With fewer than 2 versions the command stops with an error.
 
+### Organizing files by extension
+
+`bucket organize NAME -ext` calls `organize_by_extension()`, which moves `image.jpg` to
+`jpg/image.jpg`, `demo.csv` to `csv/demo.csv` and so on, and returns a `Counter` with the number of
+moved files per extension. The CLI prints it sorted by extension, one line each (`csv - 4`).
+
+- **S3 has no folders and no "move".** A folder is only a key prefix (`csv/`), so the console shows
+  `csv/` as soon as one key starts with it. A move is two requests: `copy_object` to the new key
+  (done inside S3, nothing is downloaded, the Content-Type is kept, works up to 5 GiB) and then
+  `delete_object` on the old key.
+- **Only the bucket root.** `list_objects_v2` is called with `Delimiter="/"`, so S3 returns only
+  root-level keys in `Contents` and groups everything inside folders under `CommonPrefixes`. Files
+  that are already in a folder are not touched, so running the command again changes nothing.
+  All keys are listed first (with a paginator, so more than 1000 objects work) and moved afterwards.
+- **Folder name.** `extension_folder()` takes the last extension in lowercase without the dot
+  (`Photo.JPG` → `jpg`, `archive.tar.gz` → `gz`). Files without an extension (`README`, `.env`) are
+  skipped and not counted.
+- If the target key already exists it is overwritten. In a versioned bucket the old key only gets a
+  delete marker, so its versions are still there.
+
 ### File type validation
 
 `download_file_and_upload_to_s3()` always, and `object upload --validate-mime` on request, only
@@ -520,6 +559,12 @@ What is covered:
   versions (other keys and delete markers skipped, newest first, across pages), copying the
   second-to-last version with its `VersionId`, and rejecting `-rp` with fewer than 2 versions
 - `bucket versioning` and `object file -ver` / `-rp` output, and rejecting two `object file` flags at once
+- organizing by extension: the folder name for each key (lowercase, last extension, `None` for keys
+  in a folder or without an extension), listing only the root with `Delimiter="/"`, a `copy_object`
+  plus `delete_object` for every moved file, the count per extension, and skipping files without
+  an extension
+- `bucket organize`: the `csv - 2` / `jpg - 1` output, requiring `-ext`, reporting a missing bucket,
+  and "Nothing to organize" when no file can be moved
 
 I also tested all commands manually against a real AWS account.
 

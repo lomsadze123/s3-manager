@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -8,8 +8,10 @@ from s3_manager import objects
 from s3_manager.objects import (
     delete_object,
     download_file_and_upload_to_s3,
+    extension_folder,
     get_object_info,
     list_object_versions,
+    organize_by_extension,
     restore_previous_version,
     set_object_access_policy,
     upload_file,
@@ -304,4 +306,61 @@ def test_restore_previous_version_needs_two_versions(client):
     with pytest.raises(ValueError, match="at least 2 are needed"):
         restore_previous_version(client, "my-bucket", "photo.jpg")
 
+    client.copy_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "key, folder",
+    [
+        ("image.jpg", "jpg"),
+        ("Data.CSV", "csv"),
+        ("archive.tar.gz", "gz"),
+        ("README", None),
+        (".env", None),
+        ("dev/photo.jpg", None),
+    ],
+)
+def test_extension_folder(key, folder):
+    assert extension_folder(key) == folder
+
+
+def fake_root_keys(client, *keys):
+    """Make client.get_paginator("list_objects_v2").paginate() return the given root-level keys."""
+    client.get_paginator.return_value.paginate.return_value = [
+        {"Contents": [{"Key": key} for key in keys]}
+    ]
+
+
+def test_organize_by_extension_moves_files_and_counts_them(client):
+    fake_root_keys(client, "image.jpg", "demo.csv", "users.csv")
+
+    counts = organize_by_extension(client, "my-bucket")
+
+    assert counts == {"csv": 2, "jpg": 1}
+    client.get_paginator.assert_called_once_with("list_objects_v2")
+    client.get_paginator.return_value.paginate.assert_called_once_with(Bucket="my-bucket", Delimiter="/")
+    assert client.copy_object.call_args_list == [
+        call(Bucket="my-bucket", Key="jpg/image.jpg", CopySource={"Bucket": "my-bucket", "Key": "image.jpg"}),
+        call(Bucket="my-bucket", Key="csv/demo.csv", CopySource={"Bucket": "my-bucket", "Key": "demo.csv"}),
+        call(Bucket="my-bucket", Key="csv/users.csv", CopySource={"Bucket": "my-bucket", "Key": "users.csv"}),
+    ]
+    assert client.delete_object.call_args_list == [
+        call(Bucket="my-bucket", Key="image.jpg"),
+        call(Bucket="my-bucket", Key="demo.csv"),
+        call(Bucket="my-bucket", Key="users.csv"),
+    ]
+
+
+def test_organize_by_extension_skips_files_without_extension(client):
+    fake_root_keys(client, "README", ".env")
+
+    assert organize_by_extension(client, "my-bucket") == {}
+    client.copy_object.assert_not_called()
+    client.delete_object.assert_not_called()
+
+
+def test_organize_by_extension_empty_bucket(client):
+    client.get_paginator.return_value.paginate.return_value = [{}]
+
+    assert organize_by_extension(client, "my-bucket") == {}
     client.copy_object.assert_not_called()
