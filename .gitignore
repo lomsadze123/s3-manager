@@ -18,3 +18,8 @@ dist/
 .vscode/
 .idea/
 .DS_Store
+
+# Local test files
+*.bin
+fake.jpg
+photo.jpg

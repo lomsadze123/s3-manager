@@ -37,3 +37,32 @@ def test_bucket_delete_keeps_bucket_when_not_confirmed(client):
 
     assert result.exit_code == 1
     client.delete_bucket.assert_not_called()
+
+
+def test_object_upload_reports_method(client, tmp_path):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"fake image")
+
+    result = runner.invoke(cli.app, ["object", "upload", str(photo), "my-bucket", "--method", "small"])
+
+    assert result.exit_code == 0
+    assert "s3://my-bucket/photo.jpg (small upload)" in result.output
+    client.put_object.assert_called_once()
+
+
+def test_lifecycle_set_uses_120_days_by_default(client):
+    result = runner.invoke(cli.app, ["lifecycle", "set", "my-bucket"])
+
+    assert result.exit_code == 0
+    assert "deleted 120 days after creation" in result.output
+    rule = client.put_bucket_lifecycle_configuration.call_args.kwargs["LifecycleConfiguration"]["Rules"][0]
+    assert rule["Expiration"] == {"Days": 120}
+
+
+def test_lifecycle_get_reports_missing_policy(client):
+    client.get_bucket_lifecycle_configuration.side_effect = make_client_error("NoSuchLifecycleConfiguration")
+
+    result = runner.invoke(cli.app, ["lifecycle", "get", "my-bucket"])
+
+    assert result.exit_code == 0
+    assert "has no lifecycle policy" in result.output

@@ -1,7 +1,7 @@
 """Command-line interface for s3-manager.
 
 This module only handles user interaction (arguments, prompts, output).
-The actual S3 work is done in buckets.py, objects.py and policies.py.
+The actual S3 work is done in buckets.py, objects.py, policies.py and lifecycle.py.
 """
 
 import json
@@ -15,7 +15,7 @@ import typer
 from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, ParamValidationError
 
-from s3_manager import buckets, objects, policies
+from s3_manager import buckets, lifecycle, objects, policies
 from s3_manager.client import init_client
 
 logger = logging.getLogger(__name__)
@@ -28,10 +28,14 @@ app = typer.Typer(
 bucket_app = typer.Typer(help="Manage buckets.", no_args_is_help=True)
 object_app = typer.Typer(help="Upload objects and manage object access.", no_args_is_help=True)
 policy_app = typer.Typer(help="Generate, apply and read bucket policies.", no_args_is_help=True)
+lifecycle_app = typer.Typer(
+    help="Delete objects automatically some days after they were created.", no_args_is_help=True
+)
 
 app.add_typer(bucket_app, name="bucket")
 app.add_typer(object_app, name="object")
 app.add_typer(policy_app, name="policy")
+app.add_typer(lifecycle_app, name="lifecycle")
 
 # Friendlier messages for common AWS error codes.
 AWS_ERROR_MESSAGES = {
@@ -47,6 +51,9 @@ AWS_ERROR_MESSAGES = {
     "SignatureDoesNotMatch": "The AWS secret access key is wrong. Check your .env file.",
     "AccessControlListNotSupported": "This bucket does not allow ACLs. Create it with --enable-acl.",
     "MalformedPolicy": "The bucket policy is not valid.",
+    "EntityTooSmall": "A multipart part is smaller than 5 MiB. Use a bigger --part-size-mb.",
+    "NoSuchUpload": "The multipart upload no longer exists (it was aborted or completed).",
+    "InvalidArgument": "AWS rejected one of the arguments. Run with --verbose for details.",
 }
 
 
@@ -168,10 +175,38 @@ def object_upload(
     key: Annotated[
         Optional[str], typer.Option(help="Object key in S3. Defaults to the file name.")
     ] = None,
+    method: Annotated[
+        str,
+        typer.Option(
+            help="'small' = one request, 'large' = multipart upload, 'auto' = choose by file size."
+        ),
+    ] = "auto",
+    threshold_mb: Annotated[
+        int, typer.Option(help="With --method auto, files of at least this size use multipart.")
+    ] = objects.DEFAULT_MULTIPART_THRESHOLD // objects.MIB,
+    part_size_mb: Annotated[
+        int, typer.Option(help="Size of each multipart part (minimum 5).")
+    ] = objects.DEFAULT_PART_SIZE // objects.MIB,
+    validate_mime: Annotated[
+        bool,
+        typer.Option(
+            "--validate-mime",
+            help="Only allow .bmp, .jpg, .jpeg, .png, .webp and .mp4, detected from the file content.",
+        ),
+    ] = False,
 ):
-    """Upload a local file to a bucket."""
-    key = objects.upload_file(init_client(), path, bucket, key=key)
-    typer.echo(f"Uploaded to s3://{bucket}/{key}")
+    """Upload a local file to a bucket (small files in one request, large files in parts)."""
+    key, used_method = objects.upload_file(
+        init_client(),
+        path,
+        bucket,
+        key=key,
+        method=method,
+        threshold=threshold_mb * objects.MIB,
+        part_size=part_size_mb * objects.MIB,
+        validate_mime=validate_mime,
+    )
+    typer.echo(f"Uploaded to s3://{bucket}/{key} ({used_method} upload)")
 
 
 @object_app.command("upload-url")
@@ -258,3 +293,45 @@ def policy_set_public(
     policies.disable_block_public_access(client, bucket)
     policies.create_bucket_policy(client, bucket)
     typer.echo(f"Bucket '{bucket}' is now publicly readable.")
+
+
+# ---------- lifecycle commands ----------
+
+@lifecycle_app.command("set")
+def lifecycle_set(
+    bucket: Annotated[str, typer.Argument(help="Bucket to apply the lifecycle policy to.")],
+    days: Annotated[
+        int, typer.Option(help="Delete objects this many days after they were created.")
+    ] = lifecycle.DEFAULT_EXPIRATION_DAYS,
+    prefix: Annotated[
+        str, typer.Option(help="Only delete objects under this folder. Default: whole bucket.")
+    ] = "",
+):
+    """Delete objects automatically N days (default 120) after creation. Replaces existing rules."""
+    rule = lifecycle.set_lifecycle_policy(init_client(), bucket, days=days, prefix=prefix)
+    where = f"under '{rule['Filter']['Prefix']}'" if rule["Filter"]["Prefix"] else "in the bucket"
+    typer.echo(f"Lifecycle policy set on '{bucket}': objects {where} are deleted {days} days after creation.")
+
+
+@lifecycle_app.command("get")
+def lifecycle_get(
+    bucket: Annotated[str, typer.Argument(help="Bucket to read the lifecycle policy from.")],
+):
+    """Show the current lifecycle rules."""
+    rules = lifecycle.read_lifecycle_policy(init_client(), bucket)
+    if rules is None:
+        typer.echo(f"Bucket '{bucket}' has no lifecycle policy.")
+    else:
+        typer.echo(json.dumps(rules, indent=2))
+
+
+@lifecycle_app.command("delete")
+def lifecycle_delete(
+    bucket: Annotated[str, typer.Argument(help="Bucket to remove the lifecycle policy from.")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+):
+    """Remove all lifecycle rules from a bucket."""
+    if not yes:
+        typer.confirm(f"Really delete all lifecycle rules of '{bucket}'?", abort=True)
+    lifecycle.delete_lifecycle_policy(init_client(), bucket)
+    typer.echo(f"Lifecycle policy of '{bucket}' deleted.")

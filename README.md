@@ -11,8 +11,13 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
 - **Buckets:** list, create, check if a bucket exists, create only if missing (`ensure`), and delete
   only if it exists (with confirmation)
 - **Uploads:** upload a local file, or download a file from a URL and upload it to S3
-- **File type validation:** URL downloads are checked with python-magic, only `.bmp`, `.jpg`,
-  `.jpeg`, `.png`, `.webp` and `.mp4` are accepted
+- **Small and large files:** small files are sent in one `put_object` request, large files with a
+  multipart upload (part by part, aborted cleanly on failure). Chosen automatically by file size
+  (default: from 100 MiB) or forced with `--method small|large`
+- **File type validation:** URL downloads (always) and local uploads (with `--validate-mime`) are
+  checked with python-magic, only `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp` and `.mp4` are accepted
+- **Lifecycle policy:** delete objects automatically 120 days (or any number of days) after
+  creation, for the whole bucket or one folder
 - **Bucket policies:** generate a public-read policy (whole bucket or only some folders), apply it,
   read the current policy, and apply one only if the bucket has none (`policy ensure`)
 - **Public access:** turn off *Block Public Access* and make a bucket publicly readable in one command
@@ -100,7 +105,9 @@ poetry run s3-manager bucket ensure my-unique-bucket-2026   # already exists -> 
 
 # 2. upload a local file and files from the internet
 poetry run s3-manager object upload ./photo.jpg my-unique-bucket-2026
-poetry run s3-manager object upload ./photo.jpg my-unique-bucket-2026 --key dev/photo.jpg
+poetry run s3-manager object upload ./photo.jpg my-unique-bucket-2026 --key dev/photo.jpg --validate-mime
+poetry run s3-manager object upload ./video.mp4 my-unique-bucket-2026   # >= 100 MiB -> multipart
+poetry run s3-manager object upload ./backup.zip my-unique-bucket-2026 --method large --part-size-mb 50
 poetry run s3-manager object upload-url https://www.python.org/static/img/python-logo.png my-unique-bucket-2026
 poetry run s3-manager object upload-url https://picsum.photos/400 my-unique-bucket-2026 --key test/random
 #   -> no extension in the key, so it is saved as test/random.jpg
@@ -113,7 +120,11 @@ poetry run s3-manager policy get my-unique-bucket-2026
 # the file is now available at:
 # https://my-unique-bucket-2026.s3.<region>.amazonaws.com/dev/photo.jpg
 
-# 4. clean up (the bucket must be empty before deleting)
+# 4. delete every object automatically 120 days after it was uploaded
+poetry run s3-manager lifecycle set my-unique-bucket-2026
+poetry run s3-manager lifecycle get my-unique-bucket-2026
+
+# 5. clean up (the bucket must be empty before deleting)
 poetry run s3-manager bucket delete my-unique-bucket-2026
 ```
 
@@ -135,6 +146,20 @@ Bucket 'bucket-that-does-not-exist' does not exist. Nothing to delete.
 $ poetry run s3-manager bucket delete some-bucket -y
 INFO: Deleting bucket 'some-bucket'...
 ERROR: The bucket is not empty. Delete its objects first. (BucketNotEmpty)
+
+$ poetry run s3-manager object upload ./video.mp4 my-unique-bucket-2026
+INFO: File is 120.0 MiB, using the 'large' upload method.
+INFO: Starting multipart upload of 'video.mp4' to s3://my-unique-bucket-2026/video.mp4 (12 parts of 10 MiB)...
+INFO: Uploaded part 1/12.
+...
+INFO: Uploaded part 12/12.
+INFO: Upload finished.
+Uploaded to s3://my-unique-bucket-2026/video.mp4 (large upload)
+
+$ poetry run s3-manager lifecycle set my-unique-bucket-2026
+INFO: Setting lifecycle rule 'expire-all-after-120-days' on 'my-unique-bucket-2026'...
+INFO: Lifecycle policy applied.
+Lifecycle policy set on 'my-unique-bucket-2026': objects in the bucket are deleted 120 days after creation.
 
 $ poetry run s3-manager object upload-url https://www.python.org/ my-unique-bucket-2026
 INFO: Downloading https://www.python.org/...
@@ -161,7 +186,7 @@ command: `s3-manager -v bucket list`.
 | `bucket ensure NAME [--enable-acl]` | Create the bucket only if it does not exist, otherwise report that it exists |
 | `bucket delete NAME [-y]` | Delete an empty bucket if it exists, otherwise report that it does not exist. Asks for confirmation unless `-y` is given. |
 | `bucket exists NAME` | Check if a bucket exists (exit code `0` = yes, `1` = no) |
-| `object upload PATH BUCKET [--key KEY]` | Upload a local file. Key defaults to the file name. |
+| `object upload PATH BUCKET [--key KEY] [--method auto\|small\|large] [--threshold-mb 100] [--part-size-mb 10] [--validate-mime]` | Upload a local file. Key defaults to the file name. `auto` uses a multipart upload for files of at least `--threshold-mb`, otherwise one request. `--validate-mime` only accepts the media types listed below. |
 | `object upload-url URL BUCKET [--key KEY]` | Download a file from a URL and upload it to S3. Only `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp`, `.mp4` are accepted. |
 | `object set-acl BUCKET KEY [--acl public-read\|private]` | Set the ACL of one object |
 | `policy generate-public-read BUCKET [--prefix P ...]` | Print a public-read policy (does not change anything). With `--prefix`, only those folders are public. |
@@ -169,6 +194,9 @@ command: `s3-manager -v bucket list`.
 | `policy get BUCKET` | Show the current bucket policy |
 | `policy ensure BUCKET [--prefix P ...]` | If the bucket has no policy, turn off Block Public Access and make the given folders public (default: `dev/` and `test/`). If it has one, report it and change nothing. |
 | `policy set-public BUCKET` | Turn off Block Public Access and apply the public-read policy |
+| `lifecycle set BUCKET [--days 120] [--prefix P]` | Delete objects `--days` days after creation (whole bucket, or only under `--prefix`). Replaces existing lifecycle rules. |
+| `lifecycle get BUCKET` | Show the current lifecycle rules |
+| `lifecycle delete BUCKET [-y]` | Remove all lifecycle rules (asks for confirmation unless `-y`) |
 
 Every command has its own help, e.g. `poetry run s3-manager object upload --help`.
 
@@ -190,12 +218,28 @@ boto3 client, and the CLI commands call them:
 | `create_bucket_policy()` | `policies.py` | `policy create`, `policy set-public`, `policy ensure` |
 | `read_bucket_policy()` | `policies.py` | `policy get`, `policy ensure` |
 
+Added for the lecture 3 assignment (small / large uploads, MIME validation, lifecycle policy):
+
+| Function | Module | Used by command |
+|---|---|---|
+| `upload_file()` | `objects.py` | `object upload` (picks the method below) |
+| `upload_small_file()` | `objects.py` | `object upload --method small` |
+| `upload_large_file()` | `objects.py` | `object upload --method large` |
+| `validate_media_type()` | `objects.py` | `object upload --validate-mime`, `object upload-url` |
+| `create_expiration_rule()` | `lifecycle.py` | `lifecycle set` |
+| `set_lifecycle_policy()` | `lifecycle.py` | `lifecycle set` |
+| `read_lifecycle_policy()` | `lifecycle.py` | `lifecycle get` |
+| `delete_lifecycle_policy()` | `lifecycle.py` | `lifecycle delete` |
+
 Differences from the lecture code:
 
 - Functions don't `print` or return `False` on errors. They log with `logging` and let the
   exception go up, and the CLI turns it into one readable error line.
 - `download_file_and_upload_to_s3()` checks the file type with python-magic instead of always
   sending `image/jpg` (see [File type validation](#file-type-validation)).
+- The lecture's `upload_file()` always used the key `hello.txt` and its return value is `None`
+  (boto3's `upload_file` returns nothing), so checking `response["ResponseMetadata"]` crashes.
+  Here the key comes from the file name or `--key`, and errors are raised as exceptions.
 - The lecture fixes the permissions issue with `delete_public_access_block()`. This tool uses
   `put_public_access_block()` with all four settings set to `False`, which has the same effect but
   keeps an explicit configuration on the bucket. It is a separate step (`policy set-public`,
@@ -209,8 +253,9 @@ s3-manager/
 │   ├── cli.py         # Typer commands, logging setup, error handling
 │   ├── client.py      # init_client(): reads .env and creates the boto3 client
 │   ├── buckets.py     # list_buckets, create_bucket, delete_bucket, bucket_exists
-│   ├── objects.py     # upload_file, download_file_and_upload_to_s3, set_object_access_policy
-│   └── policies.py    # generate_public_read_policy, create_bucket_policy, read_bucket_policy
+│   ├── objects.py     # upload_file (small / large), download_file_and_upload_to_s3, set_object_access_policy
+│   ├── policies.py    # generate_public_read_policy, create_bucket_policy, read_bucket_policy
+│   └── lifecycle.py   # set_lifecycle_policy, read_lifecycle_policy, delete_lifecycle_policy
 ├── tests/             # pytest unit tests for each module and the CLI (no AWS account needed)
 ├── .env.example       # template for the .env file
 ├── pyproject.toml     # project metadata and dependencies
@@ -225,7 +270,7 @@ The code is split into three simple layers:
 
 1. **`cli.py`** is the only part that talks to the user. It parses arguments, asks for confirmation,
    prints results and turns errors into short messages.
-2. **`buckets.py`, `objects.py`, `policies.py`** contain plain functions that do the S3 work. They
+2. **`buckets.py`, `objects.py`, `policies.py`, `lifecycle.py`** contain plain functions that do the S3 work. They
    don't print anything; they return data or raise exceptions. Each function receives the boto3
    client as its first argument, which makes them easy to test with a fake client.
 3. **`client.py`** is the only place that reads configuration from the environment.
@@ -252,14 +297,61 @@ comes back as a Python dict. Because many storage services implement the same AP
 - **The us-east-1 exception.** In every region except `us-east-1`, `create_bucket` needs a
   `LocationConstraint`. In `us-east-1` it must be left out.
 - **Content-Type.** S3 stores metadata with each object. I set `Content-Type` (from the file
-  extension or the HTTP response header) so that browsers show images instead of downloading them.
+  extension, or from the file content when the extension is unknown or `--validate-mime` is used)
+  so that browsers show images instead of downloading them.
 - **Folders don't really exist.** A key like `images/photo.jpg` is just a string; the AWS console
   only displays it as a folder. Keys also have no leading slash, so a policy for `/dev/*` would
   match nothing. `--prefix /dev`, `--prefix dev` and `--prefix dev/` all mean the `dev/` folder.
 
+### Small vs large uploads
+
+`object upload` has two ways to send a file, implemented with the low-level S3 calls so each step
+is visible:
+
+| | Small (`upload_small_file`) | Large (`upload_large_file`) |
+|---|---|---|
+| S3 API | one `put_object` request | `create_multipart_upload` → `upload_part` × N → `complete_multipart_upload` |
+| Memory | whole file at once | one part at a time (default 10 MiB) |
+| Limits | max 5 GiB | parts of at least 5 MiB (except the last), max 10,000 parts, objects up to 5 TiB |
+| On a network error | the whole file is sent again | the upload is aborted with `abort_multipart_upload` |
+
+With `--method auto` (the default) files of at least 100 MiB use the multipart upload, which is
+where AWS recommends switching. `--threshold-mb` and `--part-size-mb` change these numbers.
+
+Each `upload_part` call returns an `ETag` (a checksum of the part). `complete_multipart_upload` gets
+the list of part numbers and ETags, and only then does S3 join the parts into one object. Until
+then the parts are invisible in the bucket **but still stored and billed**. That's why any error
+during the upload calls `abort_multipart_upload`, which deletes the parts that were already sent.
+
+### Lifecycle policy
+
+A lifecycle configuration is a list of rules that S3 runs on its own, without any request from us.
+`lifecycle set` creates this rule:
+
+```json
+{
+  "ID": "expire-all-after-120-days",
+  "Status": "Enabled",
+  "Filter": {"Prefix": ""},
+  "Expiration": {"Days": 120}
+}
+```
+
+`"Expiration": {"Days": 120}` means every object is deleted 120 days after it was created
+(uploaded). An empty prefix matches every object; `--prefix logs/` would only match keys starting
+with `logs/`. A few details:
+
+- S3 rounds the time up to the next midnight UTC and deletes expired objects in the background, so
+  an object can stay visible a little longer, but you are not billed for it after it expired.
+- `put_bucket_lifecycle_configuration` **replaces** the whole configuration, so setting a rule
+  removes any other rules the bucket had.
+- The rule also applies to objects that were uploaded before it was created: an object that is
+  already older than 120 days is deleted soon after the rule is set.
+
 ### File type validation
 
-`download_file_and_upload_to_s3()` only accepts `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp` and `.mp4`.
+`download_file_and_upload_to_s3()` always, and `object upload --validate-mime` on request, only
+accept `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp` and `.mp4` (the check is in `validate_media_type()`).
 The URL and the server's `Content-Type` header can both be wrong (for example an error page served
 as `image/jpeg`), so the type is detected from the downloaded bytes themselves. python-magic reads
 the first bytes of the file (the "magic numbers", e.g. every PNG starts with `\x89PNG`) and returns
@@ -333,8 +425,13 @@ What is covered:
 - `bucket delete`: reporting a missing bucket, deleting an existing one, and keeping it when the
   confirmation is declined
 - the object key and Content-Type for both upload functions
-- file type validation: allowed types accepted, missing extension added, unsupported type and
-  wrong extension rejected before uploading
+- small uploads sent with one `put_object`, and `auto` switching to multipart at the threshold
+- multipart uploads: the file split into the right parts, parts completed in order with their
+  ETags, the upload aborted when a part fails, and parts under 5 MiB rejected
+- file type validation for URL downloads and `--validate-mime` uploads: allowed types accepted,
+  missing extension added, unsupported type and wrong extension rejected before uploading
+- the lifecycle rule (120 days by default, prefix without leading slash), and `lifecycle get`
+  returning "no policy" for `NoSuchLifecycleConfiguration`
 - rejecting an unknown ACL before calling AWS
 
 I also tested all commands manually against a real AWS account.
@@ -347,7 +444,9 @@ I also tested all commands manually against a real AWS account.
 - uploading a custom policy from a JSON file
 - a `--dry-run` option that shows what would happen without changing anything
 - integration tests with [moto](https://github.com/getmoto/moto) or a local MinIO container
-- the same file type validation for local uploads (`object upload`)
+- a progress bar for multipart uploads, and uploading the parts in parallel
+- resuming an interrupted multipart upload instead of starting again
+- adding a lifecycle rule without replacing the existing ones
 
 ## Troubleshooting
 

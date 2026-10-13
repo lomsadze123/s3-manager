@@ -2,19 +2,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from s3_manager.objects import download_file_and_upload_to_s3, set_object_access_policy, upload_file
-
-
-def test_upload_file_uses_file_name_and_content_type(client, tmp_path):
-    photo = tmp_path / "photo.jpg"
-    photo.write_bytes(b"fake image")
-
-    key = upload_file(client, photo, "my-bucket")
-
-    assert key == "photo.jpg"
-    client.upload_file.assert_called_once_with(
-        str(photo), "my-bucket", "photo.jpg", ExtraArgs={"ContentType": "image/jpeg"}
-    )
+from s3_manager import objects
+from s3_manager.objects import (
+    download_file_and_upload_to_s3,
+    set_object_access_policy,
+    upload_file,
+    upload_large_file,
+)
 
 
 # The first bytes ("magic numbers") of real files, enough for python-magic to detect the type.
@@ -29,6 +23,127 @@ HTML_BYTES = b"<!doctype html><html><body>Not an image</body></html>"
 
 def fake_download(mock_get, content, content_type="application/octet-stream"):
     mock_get.return_value = MagicMock(content=content, headers={"Content-Type": content_type})
+
+
+@pytest.fixture
+def small_parts(monkeypatch):
+    """Allow tiny multipart parts so the tests don't need files of many megabytes."""
+    monkeypatch.setattr(objects, "MIN_PART_SIZE", 1)
+
+
+def test_upload_file_small_uses_put_object(client, tmp_path):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"fake image")
+
+    key, method = upload_file(client, photo, "my-bucket")
+
+    assert (key, method) == ("photo.jpg", "small")
+    client.put_object.assert_called_once_with(
+        Bucket="my-bucket", Key="photo.jpg", Body=b"fake image", ContentType="image/jpeg"
+    )
+    client.create_multipart_upload.assert_not_called()
+
+
+def test_upload_file_auto_uses_multipart_from_threshold(client, tmp_path, small_parts):
+    data = tmp_path / "data.bin"
+    data.write_bytes(b"x" * 10)
+    client.upload_part.return_value = {"ETag": '"etag"'}
+
+    key, method = upload_file(client, data, "my-bucket", key="big/data.bin", threshold=10, part_size=4)
+
+    assert (key, method) == ("big/data.bin", "large")
+    client.put_object.assert_not_called()
+    client.complete_multipart_upload.assert_called_once()
+
+
+def test_upload_large_file_sends_parts_in_order(client, tmp_path, small_parts):
+    data = tmp_path / "data.bin"
+    data.write_bytes(b"aaaabbbbcc")
+    client.create_multipart_upload.return_value = {"UploadId": "upload-1"}
+    client.upload_part.side_effect = [{"ETag": '"e1"'}, {"ETag": '"e2"'}, {"ETag": '"e3"'}]
+
+    upload_large_file(client, data, "my-bucket", "data.bin", "application/octet-stream", part_size=4)
+
+    client.create_multipart_upload.assert_called_once_with(
+        Bucket="my-bucket", Key="data.bin", ContentType="application/octet-stream"
+    )
+    bodies = [call.kwargs["Body"] for call in client.upload_part.call_args_list]
+    assert bodies == [b"aaaa", b"bbbb", b"cc"]
+    client.complete_multipart_upload.assert_called_once_with(
+        Bucket="my-bucket",
+        Key="data.bin",
+        UploadId="upload-1",
+        MultipartUpload={
+            "Parts": [
+                {"ETag": '"e1"', "PartNumber": 1},
+                {"ETag": '"e2"', "PartNumber": 2},
+                {"ETag": '"e3"', "PartNumber": 3},
+            ]
+        },
+    )
+    client.abort_multipart_upload.assert_not_called()
+
+
+def test_upload_large_file_aborts_when_a_part_fails(client, tmp_path, small_parts):
+    data = tmp_path / "data.bin"
+    data.write_bytes(b"aaaabbbb")
+    client.create_multipart_upload.return_value = {"UploadId": "upload-1"}
+    client.upload_part.side_effect = [{"ETag": '"e1"'}, ConnectionError("network down")]
+
+    with pytest.raises(ConnectionError):
+        upload_large_file(client, data, "my-bucket", "data.bin", part_size=4)
+
+    client.abort_multipart_upload.assert_called_once_with(
+        Bucket="my-bucket", Key="data.bin", UploadId="upload-1"
+    )
+    client.complete_multipart_upload.assert_not_called()
+
+
+def test_upload_large_file_rejects_parts_below_5_mib(client, tmp_path):
+    data = tmp_path / "data.bin"
+    data.write_bytes(b"x")
+
+    with pytest.raises(ValueError, match="5 MiB"):
+        upload_large_file(client, data, "my-bucket", "data.bin", part_size=1024)
+
+    client.create_multipart_upload.assert_not_called()
+
+
+def test_upload_file_rejects_unknown_method(client, tmp_path):
+    data = tmp_path / "data.bin"
+    data.write_bytes(b"x")
+
+    with pytest.raises(ValueError, match="Upload method"):
+        upload_file(client, data, "my-bucket", method="medium")
+
+
+def test_upload_file_validate_mime_uses_detected_type(client, tmp_path):
+    # No extension in the file name: the type comes from the content and .png is added to the key.
+    image = tmp_path / "logo"
+    image.write_bytes(PNG_BYTES)
+
+    key, _ = upload_file(client, image, "my-bucket", validate_mime=True)
+
+    assert key == "logo.png"
+    assert client.put_object.call_args.kwargs["ContentType"] == "image/png"
+
+
+@pytest.mark.parametrize(
+    ("file_name", "content", "error"),
+    [
+        ("page.jpg", HTML_BYTES, "Unsupported file type 'text/html'"),
+        ("photo.png", JPEG_BYTES, "image/jpeg"),
+    ],
+)
+def test_upload_file_validate_mime_rejects_bad_files(client, tmp_path, file_name, content, error):
+    path = tmp_path / file_name
+    path.write_bytes(content)
+
+    with pytest.raises(ValueError, match=error):
+        upload_file(client, path, "my-bucket", validate_mime=True)
+
+    client.put_object.assert_not_called()
+    client.create_multipart_upload.assert_not_called()
 
 
 @patch("s3_manager.objects.requests.get")
