@@ -1,4 +1,4 @@
-"""Object operations: uploading files and setting object access."""
+"""Object operations: uploading, inspecting and deleting files, and setting object access."""
 
 import io
 import logging
@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import magic
 import requests
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -226,3 +227,25 @@ def set_object_access_policy(client, bucket, key, acl="public-read"):
     logger.info("Setting ACL '%s' on s3://%s/%s...", acl, bucket, key)
     client.put_object_acl(Bucket=bucket, Key=key, ACL=acl)
     logger.info("ACL updated.")
+
+
+def get_object_info(client, bucket, key):
+    """Return the size and Content-Type of an object, or None if it does not exist."""
+    try:
+        response = client.head_object(Bucket=bucket, Key=key)
+    except ClientError as error:
+        if error.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            return None
+        raise
+    return {"size": response["ContentLength"], "content_type": response.get("ContentType")}
+
+
+def delete_object(client, bucket, key):
+    """Delete one object.
+
+    S3 answers with success even if the key does not exist, so check with
+    get_object_info() first. In a versioned bucket this only adds a delete marker.
+    """
+    logger.info("Deleting s3://%s/%s...", bucket, key)
+    client.delete_object(Bucket=bucket, Key=key)
+    logger.info("Object deleted.")

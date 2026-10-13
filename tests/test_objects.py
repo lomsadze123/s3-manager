@@ -1,14 +1,18 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from s3_manager import objects
 from s3_manager.objects import (
+    delete_object,
     download_file_and_upload_to_s3,
+    get_object_info,
     set_object_access_policy,
     upload_file,
     upload_large_file,
 )
+from tests.conftest import make_client_error
 
 
 # The first bytes ("magic numbers") of real files, enough for python-magic to detect the type.
@@ -201,3 +205,29 @@ def test_set_object_access_policy_rejects_unknown_acl(client):
         set_object_access_policy(client, "my-bucket", "photo.jpg", acl="public-read-write")
 
     client.put_object_acl.assert_not_called()
+
+
+def test_get_object_info_returns_size_and_type(client):
+    client.head_object.return_value = {"ContentLength": 10, "ContentType": "image/jpeg"}
+
+    assert get_object_info(client, "my-bucket", "dev/photo.jpg") == {"size": 10, "content_type": "image/jpeg"}
+    client.head_object.assert_called_once_with(Bucket="my-bucket", Key="dev/photo.jpg")
+
+
+def test_get_object_info_returns_none_for_missing_object(client):
+    client.head_object.side_effect = make_client_error("404")
+
+    assert get_object_info(client, "my-bucket", "missing.jpg") is None
+
+
+def test_get_object_info_raises_on_access_denied(client):
+    client.head_object.side_effect = make_client_error("403")
+
+    with pytest.raises(ClientError):
+        get_object_info(client, "my-bucket", "photo.jpg")
+
+
+def test_delete_object_deletes_the_key(client):
+    delete_object(client, "my-bucket", "dev/photo.jpg")
+
+    client.delete_object.assert_called_once_with(Bucket="my-bucket", Key="dev/photo.jpg")

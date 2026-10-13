@@ -233,6 +233,34 @@ def object_set_acl(
     typer.echo(f"ACL of s3://{bucket}/{key} set to '{acl}'.")
 
 
+@object_app.command("file")
+def object_file(
+    bucket: Annotated[str, typer.Argument(help="Bucket containing the object.")],
+    key: Annotated[str, typer.Argument(help="Object key (file name in S3), e.g. dev/photo.jpg.")],
+    delete: Annotated[bool, typer.Option("-del", "--delete", help="Delete the object.")] = False,
+):
+    """Show the size and type of an object, or delete it with -del."""
+    client = init_client()
+    if not buckets.bucket_exists(client, bucket):
+        typer.echo(f"Bucket '{bucket}' does not exist.")
+        raise typer.Exit(code=1)
+
+    info = objects.get_object_info(client, bucket, key)
+    if info is None:
+        if delete:
+            typer.echo(f"Object 's3://{bucket}/{key}' does not exist. Nothing to delete.")
+            return
+        typer.echo(f"Object 's3://{bucket}/{key}' does not exist.")
+        raise typer.Exit(code=1)
+
+    if delete:
+        objects.delete_object(client, bucket, key)
+        typer.echo(f"Object 's3://{bucket}/{key}' deleted.")
+    else:
+        typer.echo(f"s3://{bucket}/{key} exists ({info['size']} bytes, {info['content_type']}).")
+        typer.echo("Pass -del to delete it.")
+
+
 # ---------- policy commands ----------
 
 @policy_app.command("generate-public-read")

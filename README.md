@@ -22,6 +22,8 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   read the current policy, and apply one only if the bucket has none (`policy ensure`)
 - **Public access:** turn off *Block Public Access* and make a bucket publicly readable in one command
 - **Object ACLs:** make a single object `public-read` or `private`
+- **Delete a file:** pass the bucket, the key and the `-del` flag (`object file BUCKET KEY -del`) to
+  delete one object; without the flag the command only shows its size and type
 - **Configuration** through a `.env` file (credentials are never stored in the code)
 - **Logging** of every operation, with a `--verbose` mode for debugging
 - **Readable errors** instead of Python tracebacks (e.g. `ERROR: The bucket does not exist. (NoSuchBucket)`)
@@ -124,7 +126,11 @@ poetry run s3-manager policy get my-unique-bucket-2026
 poetry run s3-manager lifecycle set my-unique-bucket-2026
 poetry run s3-manager lifecycle get my-unique-bucket-2026
 
-# 5. clean up (the bucket must be empty before deleting)
+# 5. look at one file, then delete it with the -del flag
+poetry run s3-manager object file my-unique-bucket-2026 dev/photo.jpg
+poetry run s3-manager object file my-unique-bucket-2026 dev/photo.jpg -del
+
+# 6. clean up (the bucket must be empty before deleting)
 poetry run s3-manager bucket delete my-unique-bucket-2026
 ```
 
@@ -161,6 +167,18 @@ INFO: Setting lifecycle rule 'expire-all-after-120-days' on 'my-unique-bucket-20
 INFO: Lifecycle policy applied.
 Lifecycle policy set on 'my-unique-bucket-2026': objects in the bucket are deleted 120 days after creation.
 
+$ poetry run s3-manager object file my-unique-bucket-2026 dev/photo.jpg
+s3://my-unique-bucket-2026/dev/photo.jpg exists (48213 bytes, image/jpeg).
+Pass -del to delete it.
+
+$ poetry run s3-manager object file my-unique-bucket-2026 dev/photo.jpg -del
+INFO: Deleting s3://my-unique-bucket-2026/dev/photo.jpg...
+INFO: Object deleted.
+Object 's3://my-unique-bucket-2026/dev/photo.jpg' deleted.
+
+$ poetry run s3-manager object file my-unique-bucket-2026 dev/photo.jpg -del
+Object 's3://my-unique-bucket-2026/dev/photo.jpg' does not exist. Nothing to delete.
+
 $ poetry run s3-manager object upload-url https://www.python.org/ my-unique-bucket-2026
 INFO: Downloading https://www.python.org/...
 INFO: Downloaded 52508 bytes, detected type: text/html.
@@ -189,6 +207,7 @@ command: `s3-manager -v bucket list`.
 | `object upload PATH BUCKET [--key KEY] [--method auto\|small\|large] [--threshold-mb 100] [--part-size-mb 10] [--validate-mime]` | Upload a local file. Key defaults to the file name. `auto` uses a multipart upload for files of at least `--threshold-mb`, otherwise one request. `--validate-mime` only accepts the media types listed below. |
 | `object upload-url URL BUCKET [--key KEY]` | Download a file from a URL and upload it to S3. Only `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp`, `.mp4` are accepted. |
 | `object set-acl BUCKET KEY [--acl public-read\|private]` | Set the ACL of one object |
+| `object file BUCKET KEY [-del\|--delete]` | With `-del`: delete the object if it exists, otherwise report that it does not exist. Without the flag: show its size and Content-Type (exit code `1` if it does not exist). |
 | `policy generate-public-read BUCKET [--prefix P ...]` | Print a public-read policy (does not change anything). With `--prefix`, only those folders are public. |
 | `policy create BUCKET` | Apply the public-read policy to the bucket |
 | `policy get BUCKET` | Show the current bucket policy |
@@ -231,6 +250,13 @@ Added for the lecture 3 assignment (small / large uploads, MIME validation, life
 | `read_lifecycle_policy()` | `lifecycle.py` | `lifecycle get` |
 | `delete_lifecycle_policy()` | `lifecycle.py` | `lifecycle delete` |
 
+Added for the "delete a file with a flag" assignment:
+
+| Function | Module | Used by command |
+|---|---|---|
+| `get_object_info()` | `objects.py` | `object file` (checks the object exists) |
+| `delete_object()` | `objects.py` | `object file -del` |
+
 Differences from the lecture code:
 
 - Functions don't `print` or return `False` on errors. They log with `logging` and let the
@@ -253,7 +279,8 @@ s3-manager/
 │   ├── cli.py         # Typer commands, logging setup, error handling
 │   ├── client.py      # init_client(): reads .env and creates the boto3 client
 │   ├── buckets.py     # list_buckets, create_bucket, delete_bucket, bucket_exists
-│   ├── objects.py     # upload_file (small / large), download_file_and_upload_to_s3, set_object_access_policy
+│   ├── objects.py     # upload_file (small / large), download_file_and_upload_to_s3, set_object_access_policy,
+│   │                  # get_object_info, delete_object
 │   ├── policies.py    # generate_public_read_policy, create_bucket_policy, read_bucket_policy
 │   └── lifecycle.py   # set_lifecycle_policy, read_lifecycle_policy, delete_lifecycle_policy
 ├── tests/             # pytest unit tests for each module and the CLI (no AWS account needed)
@@ -302,6 +329,12 @@ comes back as a Python dict. Because many storage services implement the same AP
 - **Folders don't really exist.** A key like `images/photo.jpg` is just a string; the AWS console
   only displays it as a folder. Keys also have no leading slash, so a policy for `/dev/*` would
   match nothing. `--prefix /dev`, `--prefix dev` and `--prefix dev/` all mean the `dev/` folder.
+- **Deleting a missing key succeeds.** `delete_object` returns success even if the key does not
+  exist, so `object file -del` first calls `head_object` (`get_object_info()`) to tell "deleted"
+  apart from "nothing to delete". In a bucket with versioning turned on, `delete_object` only adds a
+  delete marker and the old versions stay (and are still billed).
+- **`-del` is one flag.** CLI options with a single dash are usually one letter (`-y`), but Click
+  (which Typer uses) also accepts longer names, so `-del` is not read as `-d -e -l`. `--delete` works too.
 
 ### Small vs large uploads
 
@@ -433,13 +466,17 @@ What is covered:
 - the lifecycle rule (120 days by default, prefix without leading slash), and `lifecycle get`
   returning "no policy" for `NoSuchLifecycleConfiguration`
 - rejecting an unknown ACL before calling AWS
+- `get_object_info` returning size and type, `None` for 404 and raising for 403, and
+  `delete_object` sending the right bucket and key
+- `object file`: `-del` and `--delete` deleting an existing object, reporting a missing object or
+  bucket without deleting anything, and only showing info when the flag is not given
 
 I also tested all commands manually against a real AWS account.
 
 ## Possible future improvements
 
 - `bucket delete --force` to delete all objects before deleting the bucket
-- `object list` and `object delete` commands
+- an `object list` command, and deleting several keys at once with `delete_objects`
 - streaming large downloads directly to S3 instead of keeping them in memory
 - uploading a custom policy from a JSON file
 - a `--dry-run` option that shows what would happen without changing anything

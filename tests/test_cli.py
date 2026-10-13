@@ -66,3 +66,52 @@ def test_lifecycle_get_reports_missing_policy(client):
 
     assert result.exit_code == 0
     assert "has no lifecycle policy" in result.output
+
+
+def test_object_file_del_deletes_existing_object(client):
+    client.head_object.return_value = {"ContentLength": 10, "ContentType": "image/jpeg"}
+
+    result = runner.invoke(cli.app, ["object", "file", "my-bucket", "dev/photo.jpg", "-del"])
+
+    assert result.exit_code == 0
+    assert "Object 's3://my-bucket/dev/photo.jpg' deleted." in result.output
+    client.delete_object.assert_called_once_with(Bucket="my-bucket", Key="dev/photo.jpg")
+
+
+def test_object_file_accepts_long_delete_flag(client):
+    client.head_object.return_value = {"ContentLength": 10, "ContentType": "image/jpeg"}
+
+    result = runner.invoke(cli.app, ["object", "file", "my-bucket", "photo.jpg", "--delete"])
+
+    assert result.exit_code == 0
+    client.delete_object.assert_called_once_with(Bucket="my-bucket", Key="photo.jpg")
+
+
+def test_object_file_del_reports_missing_object(client):
+    client.head_object.side_effect = make_client_error("404")
+
+    result = runner.invoke(cli.app, ["object", "file", "my-bucket", "missing.jpg", "-del"])
+
+    assert result.exit_code == 0
+    assert "does not exist. Nothing to delete." in result.output
+    client.delete_object.assert_not_called()
+
+
+def test_object_file_without_flag_only_shows_info(client):
+    client.head_object.return_value = {"ContentLength": 10, "ContentType": "image/jpeg"}
+
+    result = runner.invoke(cli.app, ["object", "file", "my-bucket", "photo.jpg"])
+
+    assert result.exit_code == 0
+    assert "10 bytes, image/jpeg" in result.output
+    client.delete_object.assert_not_called()
+
+
+def test_object_file_reports_missing_bucket(client):
+    client.head_bucket.side_effect = make_client_error("404")
+
+    result = runner.invoke(cli.app, ["object", "file", "missing-bucket", "photo.jpg", "-del"])
+
+    assert result.exit_code == 1
+    assert "Bucket 'missing-bucket' does not exist." in result.output
+    client.delete_object.assert_not_called()
