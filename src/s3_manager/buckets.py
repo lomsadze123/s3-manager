@@ -63,3 +63,21 @@ def ensure_bucket(client, name, enable_acl=False):
 
     create_bucket(client, name, enable_acl=enable_acl)
     return True
+
+
+def get_bucket_versioning(client, name):
+    """Return the versioning status of a bucket: "Enabled", "Suspended" or None.
+
+    None means versioning was never enabled. AWS then leaves Status out of the response.
+    Once enabled, versioning can only be suspended, never turned fully off again.
+    """
+    logger.info("Reading versioning status of bucket '%s'...", name)
+    return client.get_bucket_versioning(Bucket=name).get("Status")
+
+
+def set_bucket_versioning(client, name, enabled=True):
+    """Enable (enabled=True) or suspend (enabled=False) versioning on a bucket."""
+    status = "Enabled" if enabled else "Suspended"
+    logger.info("Setting versioning of bucket '%s' to %s...", name, status)
+    client.put_bucket_versioning(Bucket=name, VersioningConfiguration={"Status": status})
+    logger.info("Versioning of bucket '%s' is now %s.", name, status)

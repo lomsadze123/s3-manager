@@ -24,6 +24,10 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
 - **Object ACLs:** make a single object `public-read` or `private`
 - **Delete a file:** pass the bucket, the key and the `-del` flag (`object file BUCKET KEY -del`) to
   delete one object; without the flag the command only shows its size and type
+- **Versioning:** check whether a bucket has versioning enabled (`bucket versioning NAME -vs`),
+  turn it on or suspend it, list the versions of a file with their creation dates
+  (`object file BUCKET KEY -ver`), and upload the second-to-last version again as a new version
+  (`object file BUCKET KEY -rp`)
 - **Configuration** through a `.env` file (credentials are never stored in the code)
 - **Logging** of every operation, with a `--verbose` mode for debugging
 - **Readable errors** instead of Python tracebacks (e.g. `ERROR: The bucket does not exist. (NoSuchBucket)`)
@@ -130,7 +134,16 @@ poetry run s3-manager lifecycle get my-unique-bucket-2026
 poetry run s3-manager object file my-unique-bucket-2026 dev/photo.jpg
 poetry run s3-manager object file my-unique-bucket-2026 dev/photo.jpg -del
 
-# 6. clean up (the bucket must be empty before deleting)
+# 6. versioning: turn it on, upload the same key twice, list the versions, bring back the old one
+poetry run s3-manager bucket versioning my-unique-bucket-2026 -vs              # never enabled
+poetry run s3-manager bucket versioning my-unique-bucket-2026 --enable -vs
+poetry run s3-manager object upload ./photo.jpg my-unique-bucket-2026 --key notes/photo.jpg
+poetry run s3-manager object upload ./other.jpg my-unique-bucket-2026 --key notes/photo.jpg
+poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -ver   # 2 versions
+poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -rp    # photo.jpg is the latest again
+poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -ver   # 3 versions
+
+# 7. clean up (the bucket must be empty before deleting)
 poetry run s3-manager bucket delete my-unique-bucket-2026
 ```
 
@@ -204,10 +217,11 @@ command: `s3-manager -v bucket list`.
 | `bucket ensure NAME [--enable-acl]` | Create the bucket only if it does not exist, otherwise report that it exists |
 | `bucket delete NAME [-y]` | Delete an empty bucket if it exists, otherwise report that it does not exist. Asks for confirmation unless `-y` is given. |
 | `bucket exists NAME` | Check if a bucket exists (exit code `0` = yes, `1` = no) |
+| `bucket versioning NAME [-vs\|--status] [--enable\|--suspend]` | `-vs`: show whether versioning is enabled, suspended or was never enabled. `--enable` / `--suspend` change it first. |
 | `object upload PATH BUCKET [--key KEY] [--method auto\|small\|large] [--threshold-mb 100] [--part-size-mb 10] [--validate-mime]` | Upload a local file. Key defaults to the file name. `auto` uses a multipart upload for files of at least `--threshold-mb`, otherwise one request. `--validate-mime` only accepts the media types listed below. |
 | `object upload-url URL BUCKET [--key KEY]` | Download a file from a URL and upload it to S3. Only `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp`, `.mp4` are accepted. |
 | `object set-acl BUCKET KEY [--acl public-read\|private]` | Set the ACL of one object |
-| `object file BUCKET KEY [-del\|--delete]` | With `-del`: delete the object if it exists, otherwise report that it does not exist. Without the flag: show its size and Content-Type (exit code `1` if it does not exist). |
+| `object file BUCKET KEY [-del\|--delete \| -ver\|--versions \| -rp\|--restore-previous]` | With `-del`: delete the object if it exists, otherwise report that it does not exist. With `-ver`: show the number of versions and when each was created. With `-rp`: upload the second-to-last version again as a new version (needs at least 2 versions). Without a flag: show its size and Content-Type (exit code `1` if it does not exist). Only one flag at a time. |
 | `policy generate-public-read BUCKET [--prefix P ...]` | Print a public-read policy (does not change anything). With `--prefix`, only those folders are public. |
 | `policy create BUCKET` | Apply the public-read policy to the bucket |
 | `policy get BUCKET` | Show the current bucket policy |
@@ -257,6 +271,15 @@ Added for the "delete a file with a flag" assignment:
 | `get_object_info()` | `objects.py` | `object file` (checks the object exists) |
 | `delete_object()` | `objects.py` | `object file -del` |
 
+Added for the versioning assignment:
+
+| Function | Module | Used by command |
+|---|---|---|
+| `get_bucket_versioning()` | `buckets.py` | `bucket versioning -vs` |
+| `set_bucket_versioning()` | `buckets.py` | `bucket versioning --enable`, `--suspend` |
+| `list_object_versions()` | `objects.py` | `object file -ver` |
+| `restore_previous_version()` | `objects.py` | `object file -rp` |
+
 Differences from the lecture code:
 
 - Functions don't `print` or return `False` on errors. They log with `logging` and let the
@@ -278,9 +301,10 @@ s3-manager/
 ├── src/s3_manager/
 │   ├── cli.py         # Typer commands, logging setup, error handling
 │   ├── client.py      # init_client(): reads .env and creates the boto3 client
-│   ├── buckets.py     # list_buckets, create_bucket, delete_bucket, bucket_exists
+│   ├── buckets.py     # list_buckets, create_bucket, delete_bucket, bucket_exists,
+│   │                  # get_bucket_versioning, set_bucket_versioning
 │   ├── objects.py     # upload_file (small / large), download_file_and_upload_to_s3, set_object_access_policy,
-│   │                  # get_object_info, delete_object
+│   │                  # get_object_info, delete_object, list_object_versions, restore_previous_version
 │   ├── policies.py    # generate_public_read_policy, create_bucket_policy, read_bucket_policy
 │   └── lifecycle.py   # set_lifecycle_policy, read_lifecycle_policy, delete_lifecycle_policy
 ├── tests/             # pytest unit tests for each module and the CLI (no AWS account needed)
@@ -381,6 +405,28 @@ with `logs/`. A few details:
 - The rule also applies to objects that were uploaded before it was created: an object that is
   already older than 120 days is deleted soon after the rule is set.
 
+### Versioning
+
+With versioning enabled, S3 keeps every version of an object instead of overwriting it. Each
+upload to the same key creates a new version with its own `VersionId`, and a normal download
+returns the newest one (`IsLatest`).
+
+- **Status.** `get_bucket_versioning` returns `Enabled` or `Suspended`. A bucket where versioning was
+  never turned on has no `Status` at all, so the command reports "never been enabled". Versioning
+  can't be turned off again once it was enabled, only suspended (new uploads overwrite, old
+  versions stay).
+- **Listing versions.** `list_object_versions` takes a `Prefix`, not an exact key, so `photo.jpg`
+  would also return versions of `photo.jpg.bak`. `list_object_versions()` keeps only the exact key,
+  goes through all pages with a paginator, and sorts the versions newest first. A version can't be
+  changed after it is written, so its `LastModified` date is its creation date. Delete markers
+  (created by deleting an object in a versioned bucket) have no content, so they are not counted.
+  In a bucket without versioning an object has one version with the id `null`.
+- **Uploading the previous version again.** `-rp` takes the second-to-last version and calls
+  `copy_object` with `CopySource={"Bucket", "Key", "VersionId"}` onto the same key. S3 copies it on
+  the server side (nothing is downloaded), keeps its Content-Type, and stores it as a new latest
+  version, so all older versions stay and the step can be undone. `copy_object` works for objects
+  up to 5 GiB. With fewer than 2 versions the command stops with an error.
+
 ### File type validation
 
 `download_file_and_upload_to_s3()` always, and `object upload --validate-mime` on request, only
@@ -470,6 +516,10 @@ What is covered:
   `delete_object` sending the right bucket and key
 - `object file`: `-del` and `--delete` deleting an existing object, reporting a missing object or
   bucket without deleting anything, and only showing info when the flag is not given
+- versioning: reading `Enabled` / `Suspended` / never enabled, enabling and suspending, listing
+  versions (other keys and delete markers skipped, newest first, across pages), copying the
+  second-to-last version with its `VersionId`, and rejecting `-rp` with fewer than 2 versions
+- `bucket versioning` and `object file -ver` / `-rp` output, and rejecting two `object file` flags at once
 
 I also tested all commands manually against a real AWS account.
 

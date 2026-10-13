@@ -164,6 +164,42 @@ def bucket_ensure(
         typer.echo(f"Bucket '{name}' already exists.")
 
 
+VERSIONING_MESSAGES = {
+    "Enabled": "Versioning is enabled on bucket '{name}'.",
+    "Suspended": "Versioning is suspended on bucket '{name}' (it was enabled before, old versions are kept).",
+    None: "Versioning has never been enabled on bucket '{name}'.",
+}
+
+
+@bucket_app.command("versioning")
+def bucket_versioning(
+    name: Annotated[str, typer.Argument(help="Name of the bucket.")],
+    status: Annotated[
+        bool, typer.Option("-vs", "--status", help="Show whether versioning is enabled.")
+    ] = False,
+    enable: Annotated[bool, typer.Option("--enable", help="Turn versioning on.")] = False,
+    suspend: Annotated[bool, typer.Option("--suspend", help="Suspend versioning.")] = False,
+):
+    """Show the versioning status of a bucket with -vs, or change it with --enable / --suspend."""
+    if enable and suspend:
+        typer.echo("Use either --enable or --suspend, not both.")
+        raise typer.Exit(code=1)
+    if not (status or enable or suspend):
+        typer.echo("Pass -vs to show the versioning status, or --enable / --suspend to change it.")
+        raise typer.Exit(code=1)
+
+    client = init_client()
+    if not buckets.bucket_exists(client, name):
+        typer.echo(f"Bucket '{name}' does not exist.")
+        raise typer.Exit(code=1)
+
+    if enable or suspend:
+        buckets.set_bucket_versioning(client, name, enabled=enable)
+        typer.echo(f"Versioning of bucket '{name}' {'enabled' if enable else 'suspended'}.")
+    if status:
+        typer.echo(VERSIONING_MESSAGES[buckets.get_bucket_versioning(client, name)].format(name=name))
+
+
 # ---------- object commands ----------
 
 @object_app.command("upload")
@@ -238,12 +274,37 @@ def object_file(
     bucket: Annotated[str, typer.Argument(help="Bucket containing the object.")],
     key: Annotated[str, typer.Argument(help="Object key (file name in S3), e.g. dev/photo.jpg.")],
     delete: Annotated[bool, typer.Option("-del", "--delete", help="Delete the object.")] = False,
+    versions: Annotated[
+        bool, typer.Option("-ver", "--versions", help="Show the number of versions and their creation dates.")
+    ] = False,
+    restore_previous: Annotated[
+        bool,
+        typer.Option(
+            "-rp", "--restore-previous", help="Upload the second-to-last version again as a new version."
+        ),
+    ] = False,
 ):
-    """Show the size and type of an object, or delete it with -del."""
+    """Show the size and type of an object, list its versions with -ver, upload its previous
+    version again with -rp, or delete it with -del."""
+    if delete + versions + restore_previous > 1:
+        typer.echo("Use only one of -del, -ver and -rp at a time.")
+        raise typer.Exit(code=1)
+
     client = init_client()
     if not buckets.bucket_exists(client, bucket):
         typer.echo(f"Bucket '{bucket}' does not exist.")
         raise typer.Exit(code=1)
+
+    if versions:
+        show_object_versions(client, bucket, key)
+        return
+    if restore_previous:
+        previous, new_version_id = objects.restore_previous_version(client, bucket, key)
+        typer.echo(
+            f"Version {previous['version_id']} (created {format_date(previous['created'])}) "
+            f"uploaded again as new version {new_version_id}."
+        )
+        return
 
     info = objects.get_object_info(client, bucket, key)
     if info is None:
@@ -259,6 +320,26 @@ def object_file(
     else:
         typer.echo(f"s3://{bucket}/{key} exists ({info['size']} bytes, {info['content_type']}).")
         typer.echo("Pass -del to delete it.")
+
+
+def format_date(date):
+    """Format an S3 timestamp (a timezone-aware datetime in UTC) for the output."""
+    return date.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def show_object_versions(client, bucket, key):
+    versions = objects.list_object_versions(client, bucket, key)
+    if not versions:
+        typer.echo(f"Object 's3://{bucket}/{key}' does not exist.")
+        raise typer.Exit(code=1)
+
+    typer.echo(f"s3://{bucket}/{key} has {len(versions)} version(s):")
+    for number, version in enumerate(versions, start=1):
+        latest = "  (latest)" if version["is_latest"] else ""
+        typer.echo(
+            f"  {number}. created {format_date(version['created'])}, {version['size']} bytes, "
+            f"id {version['version_id']}{latest}"
+        )
 
 
 # ---------- policy commands ----------

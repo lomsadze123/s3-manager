@@ -249,3 +249,58 @@ def delete_object(client, bucket, key):
     logger.info("Deleting s3://%s/%s...", bucket, key)
     client.delete_object(Bucket=bucket, Key=key)
     logger.info("Object deleted.")
+
+
+def list_object_versions(client, bucket, key):
+    """Return all versions of one object, newest first.
+
+    Each item is {"version_id", "created", "size", "is_latest"}. A version can't be changed
+    after it is written, so its LastModified date is the date the version was created.
+    Delete markers (left by deleting an object in a versioned bucket) are not versions with
+    content, so they are skipped. In a bucket without versioning there is at most one version,
+    with the id "null". An empty list means the object does not exist.
+    """
+    logger.info("Listing versions of s3://%s/%s...", bucket, key)
+    versions = []
+    paginator = client.get_paginator("list_object_versions")
+    for page in paginator.paginate(Bucket=bucket, Prefix=key):
+        for version in page.get("Versions", []):
+            # Prefix also matches other keys that start with the same text, e.g. photo.jpg.bak.
+            if version["Key"] != key:
+                continue
+            versions.append({
+                "version_id": version["VersionId"],
+                "created": version["LastModified"],
+                "size": version["Size"],
+                "is_latest": version["IsLatest"],
+            })
+    versions.sort(key=lambda version: version["created"], reverse=True)
+    return versions
+
+
+def restore_previous_version(client, bucket, key):
+    """Upload the second-to-last version of an object again, as a new (latest) version.
+
+    S3 copies the old version onto the same key with copy_object, so nothing is downloaded and
+    the content and metadata (e.g. Content-Type) stay the same. All older versions are kept.
+    copy_object works for objects up to 5 GiB.
+
+    Returns (source_version, new_version_id), where source_version is the item from
+    list_object_versions() that was copied.
+    """
+    versions = list_object_versions(client, bucket, key)
+    if len(versions) < 2:
+        raise ValueError(
+            f"s3://{bucket}/{key} has {len(versions)} version(s), at least 2 are needed. "
+            f"Enable versioning with 'bucket versioning {bucket} --enable' and upload the file again."
+        )
+
+    previous = versions[1]
+    logger.info("Copying version %s of s3://%s/%s as a new version...", previous["version_id"], bucket, key)
+    response = client.copy_object(
+        Bucket=bucket,
+        Key=key,
+        CopySource={"Bucket": bucket, "Key": key, "VersionId": previous["version_id"]},
+    )
+    logger.info("New version created.")
+    return previous, response.get("VersionId")

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,6 +9,8 @@ from s3_manager.objects import (
     delete_object,
     download_file_and_upload_to_s3,
     get_object_info,
+    list_object_versions,
+    restore_previous_version,
     set_object_access_policy,
     upload_file,
     upload_large_file,
@@ -231,3 +234,74 @@ def test_delete_object_deletes_the_key(client):
     delete_object(client, "my-bucket", "dev/photo.jpg")
 
     client.delete_object.assert_called_once_with(Bucket="my-bucket", Key="dev/photo.jpg")
+
+
+def fake_versions(client, *pages):
+    """Make client.get_paginator("list_object_versions").paginate() return the given pages."""
+    client.get_paginator.return_value.paginate.return_value = list(pages)
+
+
+def version(key, version_id, day, is_latest=False, size=10):
+    return {
+        "Key": key,
+        "VersionId": version_id,
+        "LastModified": datetime(2026, 10, day, tzinfo=timezone.utc),
+        "Size": size,
+        "IsLatest": is_latest,
+    }
+
+
+def test_list_object_versions_newest_first_and_only_this_key(client):
+    fake_versions(
+        client,
+        {
+            "Versions": [version("photo.jpg", "v1", 1), version("photo.jpg.bak", "other", 5)],
+            "DeleteMarkers": [{"Key": "photo.jpg", "VersionId": "marker"}],
+        },
+        {"Versions": [version("photo.jpg", "v2", 3, is_latest=True)]},
+    )
+
+    versions = list_object_versions(client, "my-bucket", "photo.jpg")
+
+    assert [v["version_id"] for v in versions] == ["v2", "v1"]
+    assert versions[0]["is_latest"] is True
+    assert versions[0]["created"] == datetime(2026, 10, 3, tzinfo=timezone.utc)
+    client.get_paginator.assert_called_once_with("list_object_versions")
+    client.get_paginator.return_value.paginate.assert_called_once_with(Bucket="my-bucket", Prefix="photo.jpg")
+
+
+def test_list_object_versions_empty_for_missing_object(client):
+    fake_versions(client, {})
+
+    assert list_object_versions(client, "my-bucket", "missing.jpg") == []
+
+
+def test_restore_previous_version_copies_second_to_last(client):
+    fake_versions(
+        client,
+        {"Versions": [
+            version("photo.jpg", "v3", 3, is_latest=True),
+            version("photo.jpg", "v2", 2),
+            version("photo.jpg", "v1", 1),
+        ]},
+    )
+    client.copy_object.return_value = {"VersionId": "v4"}
+
+    previous, new_version_id = restore_previous_version(client, "my-bucket", "photo.jpg")
+
+    assert previous["version_id"] == "v2"
+    assert new_version_id == "v4"
+    client.copy_object.assert_called_once_with(
+        Bucket="my-bucket",
+        Key="photo.jpg",
+        CopySource={"Bucket": "my-bucket", "Key": "photo.jpg", "VersionId": "v2"},
+    )
+
+
+def test_restore_previous_version_needs_two_versions(client):
+    fake_versions(client, {"Versions": [version("photo.jpg", "null", 1, is_latest=True)]})
+
+    with pytest.raises(ValueError, match="at least 2 are needed"):
+        restore_previous_version(client, "my-bucket", "photo.jpg")
+
+    client.copy_object.assert_not_called()

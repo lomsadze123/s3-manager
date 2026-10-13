@@ -1,7 +1,14 @@
 import pytest
 from botocore.exceptions import ClientError
 
-from s3_manager.buckets import bucket_exists, create_bucket, ensure_bucket, list_buckets
+from s3_manager.buckets import (
+    bucket_exists,
+    create_bucket,
+    ensure_bucket,
+    get_bucket_versioning,
+    list_buckets,
+    set_bucket_versioning,
+)
 from tests.conftest import make_client_error
 
 
@@ -56,4 +63,27 @@ def test_ensure_bucket_creates_missing_bucket(client):
     client.create_bucket.assert_called_once_with(
         Bucket="my-bucket",
         CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
+    )
+
+
+@pytest.mark.parametrize("status", ["Enabled", "Suspended"])
+def test_get_bucket_versioning_returns_status(client, status):
+    client.get_bucket_versioning.return_value = {"Status": status}
+
+    assert get_bucket_versioning(client, "my-bucket") == status
+    client.get_bucket_versioning.assert_called_once_with(Bucket="my-bucket")
+
+
+def test_get_bucket_versioning_returns_none_if_never_enabled(client):
+    client.get_bucket_versioning.return_value = {}
+
+    assert get_bucket_versioning(client, "my-bucket") is None
+
+
+@pytest.mark.parametrize("enabled, status", [(True, "Enabled"), (False, "Suspended")])
+def test_set_bucket_versioning(client, enabled, status):
+    set_bucket_versioning(client, "my-bucket", enabled=enabled)
+
+    client.put_bucket_versioning.assert_called_once_with(
+        Bucket="my-bucket", VersioningConfiguration={"Status": status}
     )
