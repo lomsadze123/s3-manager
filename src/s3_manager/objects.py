@@ -40,6 +40,16 @@ ALLOWED_MEDIA_TYPES = {
 }
 ALLOWED_MEDIA_EXTENSIONS = ".bmp, .jpg, .jpeg, .png, .webp, .mp4"
 
+# Used by type_folder. For these types python-magic can't say more than "some text" or "some
+# bytes", so the file's own extension decides the folder (data.csv is detected as text/plain).
+GENERIC_MIME_TYPES = ("text/plain", "application/octet-stream", "inode/x-empty")
+# Detected types the mimetypes module has no extension for.
+MIME_TYPE_FOLDERS = {
+    "image/x-ms-bmp": "bmp",
+    "text/x-python": "py",
+    "text/x-script.python": "py",
+}
+
 
 def upload_file(
     client,
@@ -50,6 +60,7 @@ def upload_file(
     threshold=DEFAULT_MULTIPART_THRESHOLD,
     part_size=DEFAULT_PART_SIZE,
     validate_mime=False,
+    by_type=False,
 ):
     """Upload a local file to a bucket. Returns (key, method) with the method that was used.
 
@@ -64,6 +75,8 @@ def upload_file(
     or from the file content if the extension is unknown. With validate_mime=True the type is
     always detected from the content and only the allowed media types are accepted (see
     validate_media_type), so nothing is uploaded if the file is e.g. HTML renamed to .jpg.
+    With by_type=True the key is put into a folder named after the type detected from the
+    content (see type_folder): fake.jpg that is really a PNG -> png/fake.jpg.
     """
     if method not in UPLOAD_METHODS:
         raise ValueError(f"Upload method must be one of {', '.join(UPLOAD_METHODS)}, got '{method}'.")
@@ -80,6 +93,11 @@ def upload_file(
         content_type = detected_type
     else:
         content_type = mimetypes.guess_type(path.name)[0] or detected_type or DEFAULT_CONTENT_TYPE
+
+    if by_type:
+        folder = type_folder(detected_type, path.name)
+        logger.info("Detected type %s, uploading into folder '%s/'.", detected_type, folder)
+        key = f"{folder}/{key}"
 
     if method == "auto":
         method = "large" if size >= threshold else "small"
@@ -190,6 +208,23 @@ def detect_mime_type(content):
     """Return the MIME type of the given bytes, detected from their content (magic numbers)."""
     # libmagic only needs the start of the file to recognise its type.
     return magic.from_buffer(content[:2048], mime=True)
+
+
+def type_folder(content_type, file_name):
+    """Return the folder name for a file: the extension of its detected MIME type, without the dot.
+
+    image/png -> "png", application/pdf -> "pdf", video/mp4 -> "mp4". For generic types
+    (text/plain, application/octet-stream, empty file) the file's own extension is used instead,
+    so data.csv -> "csv". If no extension is found at all, returns UNKNOWN_FOLDER.
+    """
+    if content_type in GENERIC_MIME_TYPES:
+        return extension_folder(Path(file_name).name) or UNKNOWN_FOLDER
+
+    folder = MIME_TYPE_FOLDERS.get(content_type)
+    if folder is None:
+        extension = mimetypes.guess_extension(content_type or "")
+        folder = extension[1:].lower() if extension else UNKNOWN_FOLDER
+    return folder
 
 
 def validate_media_type(content_type, key):

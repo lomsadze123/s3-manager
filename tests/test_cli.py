@@ -52,6 +52,18 @@ def test_object_upload_reports_method(client, tmp_path):
     client.put_object.assert_called_once()
 
 
+def test_object_upload_by_type_puts_file_into_type_folder(client, tmp_path):
+    # "fake image" is plain text for python-magic, so the folder comes from the .jpg extension.
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"fake image")
+
+    result = runner.invoke(cli.app, ["object", "upload", str(photo), "my-bucket", "--by-type"])
+
+    assert result.exit_code == 0
+    assert "s3://my-bucket/jpg/photo.jpg" in result.output
+    assert client.put_object.call_args.kwargs["Key"] == "jpg/photo.jpg"
+
+
 def test_lifecycle_set_uses_120_days_by_default(client):
     result = runner.invoke(cli.app, ["lifecycle", "set", "my-bucket"])
 

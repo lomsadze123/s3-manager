@@ -310,6 +310,15 @@ def object_upload(
             help="Only allow .bmp, .jpg, .jpeg, .png, .webp and .mp4, detected from the file content.",
         ),
     ] = False,
+    by_type: Annotated[
+        bool,
+        typer.Option(
+            "-bt",
+            "--by-type",
+            help="Put the file into a folder named after its real type, detected from the content "
+            f"with python-magic (fake.jpg that is a PNG -> png/fake.jpg, unknown types -> {objects.UNKNOWN_FOLDER}/).",
+        ),
+    ] = False,
 ):
     """Upload a local file to a bucket (small files in one request, large files in parts)."""
     key, used_method = objects.upload_file(
@@ -321,6 +330,7 @@ def object_upload(
         threshold=threshold_mb * objects.MIB,
         part_size=part_size_mb * objects.MIB,
         validate_mime=validate_mime,
+        by_type=by_type,
     )
     typer.echo(f"Uploaded to s3://{bucket}/{key} ({used_method} upload)")
 

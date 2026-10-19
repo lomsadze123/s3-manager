@@ -19,6 +19,11 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   available too: `--method upload_file|upload_fileobj`
 - **File type validation:** URL downloads (always) and local uploads (with `--validate-mime`) are
   checked with python-magic, only `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp` and `.mp4` are accepted
+- **Upload into a folder by type:** `object upload FILE BUCKET -bt` (`--by-type`) uploads a file of
+  any extension into a folder named after its real type, detected from the content with
+  python-magic (`photo.jpg` → `jpg/photo.jpg`, `report.pdf` → `pdf/report.pdf`, a `fake.jpg` that
+  is really a PNG → `png/fake.jpg`). When magic only sees plain text or raw bytes, the file's own
+  extension decides (`data.csv` → `csv/data.csv`); with no type and no extension it goes to `unknown/`
 - **Default encryption:** show a bucket's default encryption or set it to SSE-S3 / AES256
   (`bucket encryption NAME -es --enable`)
 - **Lifecycle policy:** delete objects automatically 120 days (or any number of days) after
@@ -54,7 +59,7 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
 | [python-dotenv](https://pypi.org/project/python-dotenv/) | loads configuration from a `.env` file |
 | [Typer](https://typer.tiangolo.com/) | builds the CLI from Python functions and type hints |
 | [requests](https://requests.readthedocs.io/) | downloads files from URLs |
-| [python-magic](https://github.com/ahupp/python-magic) | detects the real file type of downloads (wrapper around the `libmagic` C library) |
+| [python-magic](https://github.com/ahupp/python-magic) | detects the real file type of downloads and `--by-type` uploads (wrapper around the `libmagic` C library) |
 | `logging` (standard library) | operation logs |
 | [pytest](https://docs.pytest.org/) | unit tests |
 
@@ -128,6 +133,8 @@ poetry run s3-manager object upload ./backup.zip my-unique-bucket-2026 --method 
 poetry run s3-manager object upload-url https://www.python.org/static/img/python-logo.png my-unique-bucket-2026
 poetry run s3-manager object upload-url https://picsum.photos/400 my-unique-bucket-2026 --key test/random
 #   -> no extension in the key, so it is saved as test/random.jpg
+poetry run s3-manager object upload ./report.pdf my-unique-bucket-2026 --by-type   # -> pdf/report.pdf
+poetry run s3-manager object upload ./fake.jpg my-unique-bucket-2026 -bt           # real PNG -> png/fake.jpg
 
 # 3. make only the dev/ and test/ folders public (skipped if the bucket already has a policy)
 poetry run s3-manager policy generate-public-read my-unique-bucket-2026 --prefix dev --prefix test  # preview
@@ -204,6 +211,13 @@ INFO: Uploaded part 1/12.
 INFO: Uploaded part 12/12.
 INFO: Upload finished.
 Uploaded to s3://my-unique-bucket-2026/video.mp4 (large upload)
+
+$ poetry run s3-manager object upload ./fake.jpg my-unique-bucket-2026 --by-type
+INFO: Detected type image/png, uploading into folder 'png/'.
+INFO: File is 0.0 MiB, using the 'small' upload method.
+INFO: Uploading 'fake.jpg' to s3://my-unique-bucket-2026/png/fake.jpg in one request...
+INFO: Upload finished.
+Uploaded to s3://my-unique-bucket-2026/png/fake.jpg (small upload)
 
 $ poetry run s3-manager lifecycle set my-unique-bucket-2026
 INFO: Setting lifecycle rule 'expire-all-after-120-days' on 'my-unique-bucket-2026'...

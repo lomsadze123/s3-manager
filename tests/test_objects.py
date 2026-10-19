@@ -16,6 +16,7 @@ from s3_manager.objects import (
     restore_previous_version,
     rollback_to_version,
     set_object_access_policy,
+    type_folder,
     upload_file,
     upload_large_file,
 )
@@ -170,6 +171,54 @@ def test_upload_file_validate_mime_rejects_bad_files(client, tmp_path, file_name
 
     client.put_object.assert_not_called()
     client.create_multipart_upload.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("content_type", "file_name", "folder"),
+    [
+        ("image/png", "fake.jpg", "png"),
+        ("video/mp4", "clip", "mp4"),
+        ("image/x-ms-bmp", "old.bmp", "bmp"),
+        ("text/plain", "Data.CSV", "csv"),
+        ("application/octet-stream", "big.bin", "bin"),
+        ("application/octet-stream", "README", "unknown"),
+        ("inode/x-empty", "empty", "unknown"),
+        ("application/x-made-up-type", "thing.xyz", "unknown"),
+    ],
+)
+def test_type_folder(content_type, file_name, folder):
+    assert type_folder(content_type, file_name) == folder
+
+
+def test_upload_file_by_type_uses_detected_type(client, tmp_path):
+    # The extension says JPEG, but the content is a PNG, so the file goes into png/.
+    image = tmp_path / "fake.jpg"
+    image.write_bytes(PNG_BYTES)
+
+    key, _ = upload_file(client, image, "my-bucket", by_type=True)
+
+    assert key == "png/fake.jpg"
+    assert client.put_object.call_args.kwargs["Key"] == "png/fake.jpg"
+
+
+def test_upload_file_by_type_with_key(client, tmp_path):
+    image = tmp_path / "photo.jpg"
+    image.write_bytes(PNG_BYTES)
+
+    key, _ = upload_file(client, image, "my-bucket", key="dev/photo.png", by_type=True)
+
+    assert key == "png/dev/photo.png"
+
+
+def test_upload_file_by_type_unknown_content(client, tmp_path, monkeypatch):
+    # python-magic finds no type and the file has no extension -> unknown/.
+    monkeypatch.setattr(objects, "detect_mime_type", lambda content: "application/octet-stream")
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"\x00\x01\x02")
+
+    key, _ = upload_file(client, blob, "my-bucket", by_type=True)
+
+    assert key == "unknown/blob"
 
 
 @patch("s3_manager.objects.requests.get")
