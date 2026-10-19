@@ -1,5 +1,7 @@
-"""Object operations: uploading, listing, inspecting, moving, deleting and restoring files, and setting object access."""
+"""Object operations: uploading, listing, inspecting, moving, deleting and restoring files, cleaning up
+old versions, and setting object access."""
 
+import calendar
 import io
 import logging
 import math
@@ -27,6 +29,7 @@ DEFAULT_PART_SIZE = 10 * MIB
 DEFAULT_MULTIPART_THRESHOLD = 100 * MIB  # AWS recommends multipart uploads from about 100 MB
 UPLOAD_METHODS = ("auto", "small", "large", "upload_file", "upload_fileobj")
 UNKNOWN_FOLDER = "unknown"
+DEFAULT_VERSION_MAX_AGE_MONTHS = 6  # 'object old-versions' deletes versions older than this
 
 # File types accepted by download_file_and_upload_to_s3 and by upload_file(validate_mime=True):
 # detected MIME type -> valid extensions. The first extension is added to keys that have none.
@@ -410,6 +413,39 @@ def copy_version_as_latest(client, bucket, key, version_id):
     )
     logger.info("New version created.")
     return response.get("VersionId")
+
+
+def months_ago(date, months):
+    """Return the same moment the given number of calendar months earlier.
+
+    2026-10-19 minus 6 months -> 2026-04-19. If that month is shorter, the last day of the month
+    is used: 2026-08-31 minus 6 months -> 2026-02-28.
+    """
+    month_index = date.year * 12 + date.month - 1 - months
+    year, month = divmod(month_index, 12)
+    month += 1
+    day = min(date.day, calendar.monthrange(year, month)[1])
+    return date.replace(year=year, month=month, day=day)
+
+
+def select_old_versions(versions, cutoff):
+    """Return the versions (items from list_object_versions()) created before cutoff.
+
+    The latest version is never returned, even if it is older, so the file itself is kept and
+    only its old history is removed.
+    """
+    return [version for version in versions if version["created"] < cutoff and not version["is_latest"]]
+
+
+def delete_object_version(client, bucket, key, version_id):
+    """Permanently delete one version of an object.
+
+    Unlike delete_object(), passing a VersionId removes that version for good (no delete marker
+    is added), so it can't be restored. Needs the s3:DeleteObjectVersion permission.
+    """
+    logger.info("Deleting version %s of s3://%s/%s...", version_id, bucket, key)
+    client.delete_object(Bucket=bucket, Key=key, VersionId=version_id)
+    logger.info("Version deleted.")
 
 
 def extension_folder(key):

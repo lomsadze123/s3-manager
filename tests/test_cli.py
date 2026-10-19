@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from unittest.mock import call
 
 import pytest
 from typer.testing import CliRunner
@@ -387,3 +388,98 @@ def test_policy_create_multiple_applies_policy(client):
     assert result.exit_code == 0
     client.put_public_access_block.assert_called_once()
     assert "s3:DeleteObject" in client.put_bucket_policy.call_args.kwargs["Policy"]
+
+
+def fake_aged_versions(client, *versions):
+    """Versions as (key, version_id, age_in_days, is_latest), dated relative to now."""
+    now = datetime.now(timezone.utc)
+    client.get_paginator.return_value.paginate.return_value = [{"Versions": [
+        {
+            "Key": key,
+            "VersionId": version_id,
+            "LastModified": now - timedelta(days=age),
+            "Size": 10,
+            "IsLatest": is_latest,
+        }
+        for key, version_id, age, is_latest in versions
+    ]}]
+
+
+def test_object_old_versions_deletes_only_old_non_latest_versions(client):
+    fake_aged_versions(
+        client,
+        ("a.txt", "a3", 1, True),
+        ("a.txt", "a2", 30, False),      # recent, kept
+        ("a.txt", "a1", 400, False),     # old, deleted
+        ("b.txt", "b2", 300, True),      # old but latest, kept
+        ("b.txt", "b1", 500, False),     # old, deleted
+    )
+
+    result = runner.invoke(cli.app, ["object", "old-versions", "my-bucket", "a.txt", "b.txt", "-y"])
+
+    assert result.exit_code == 0
+    assert "s3://my-bucket/a.txt has 3 version(s):" in result.output
+    assert "s3://my-bucket/b.txt has 2 version(s):" in result.output
+    assert "id a1  -> older than 6 month(s)" in result.output
+    assert client.delete_object.call_args_list == [
+        call(Bucket="my-bucket", Key="a.txt", VersionId="a1"),
+        call(Bucket="my-bucket", Key="b.txt", VersionId="b1"),
+    ]
+    assert "2 old version(s) deleted." in result.output
+
+
+def test_object_old_versions_dry_run_deletes_nothing(client):
+    fake_aged_versions(client, ("a.txt", "a2", 1, True), ("a.txt", "a1", 400, False))
+
+    result = runner.invoke(cli.app, ["object", "old-versions", "my-bucket", "a.txt", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Dry run: 1 version(s)" in result.output
+    client.delete_object.assert_not_called()
+
+
+def test_object_old_versions_needs_confirmation(client):
+    fake_aged_versions(client, ("a.txt", "a2", 1, True), ("a.txt", "a1", 400, False))
+
+    result = runner.invoke(cli.app, ["object", "old-versions", "my-bucket", "a.txt"], input="n\n")
+
+    assert result.exit_code == 1
+    client.delete_object.assert_not_called()
+
+
+def test_object_old_versions_months_zero_deletes_every_older_version(client):
+    fake_aged_versions(client, ("a.txt", "a2", 1, True), ("a.txt", "a1", 2, False))
+
+    result = runner.invoke(cli.app, ["object", "old-versions", "my-bucket", "a.txt", "--months", "0", "-y"])
+
+    assert result.exit_code == 0
+    client.delete_object.assert_called_once_with(Bucket="my-bucket", Key="a.txt", VersionId="a1")
+
+
+def test_object_old_versions_reports_missing_key_and_continues(client):
+    fake_aged_versions(client, ("a.txt", "a2", 1, True), ("a.txt", "a1", 400, False))
+
+    result = runner.invoke(cli.app, ["object", "old-versions", "my-bucket", "missing.txt", "a.txt", "-y"])
+
+    assert result.exit_code == 1
+    assert "Object 's3://my-bucket/missing.txt' does not exist." in result.output
+    client.delete_object.assert_called_once_with(Bucket="my-bucket", Key="a.txt", VersionId="a1")
+
+
+def test_object_old_versions_nothing_to_delete(client):
+    fake_aged_versions(client, ("a.txt", "a2", 1, True), ("a.txt", "a1", 30, False))
+
+    result = runner.invoke(cli.app, ["object", "old-versions", "my-bucket", "a.txt"])
+
+    assert result.exit_code == 0
+    assert "Nothing to delete." in result.output
+    client.delete_object.assert_not_called()
+
+
+def test_object_old_versions_reports_missing_bucket(client):
+    client.head_bucket.side_effect = make_client_error("404")
+
+    result = runner.invoke(cli.app, ["object", "old-versions", "missing-bucket", "a.txt"])
+
+    assert result.exit_code == 1
+    assert "Bucket 'missing-bucket' does not exist." in result.output

@@ -40,6 +40,10 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   turn it on or suspend it, list the versions of a file with their creation dates
   (`object file BUCKET KEY -ver`), and upload the second-to-last version (`-rp`) or any chosen
   version (`-rbt VERSION_ID`) again as a new version
+- **Delete old versions:** pass a bucket and one or more files
+  (`object old-versions BUCKET KEY [KEY...]`) to list the versions of each file and permanently
+  delete every version created more than 6 months ago (`--months N`). The latest version is always
+  kept, `--dry-run` only shows what would be deleted
 - **Organize by extension:** pass the bucket and the `-ext` flag (`bucket organize NAME -ext`) to
   move every file into a folder named after its extension (`image.jpg` → `jpg/image.jpg`,
   `demo.csv` → `csv/demo.csv`) and print how many files were moved per extension (`csv - 2`).
@@ -160,6 +164,11 @@ poetry run s3-manager object upload ./other.jpg my-unique-bucket-2026 --key note
 poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -ver   # 2 versions
 poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -rp    # photo.jpg is the latest again
 poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -ver   # 3 versions
+# delete versions older than 6 months of one or more files (the latest version is always kept)
+poetry run s3-manager object old-versions my-unique-bucket-2026 notes/photo.jpg demo.csv --dry-run
+poetry run s3-manager object old-versions my-unique-bucket-2026 notes/photo.jpg demo.csv   # asks first
+# fresh test versions are never 6 months old; --months 0 treats every non-latest version as old
+poetry run s3-manager object old-versions my-unique-bucket-2026 notes/photo.jpg --months 0 --dry-run
 
 # 7. sort the files in the bucket root into folders by extension
 poetry run s3-manager object upload ./image.jpg my-unique-bucket-2026
@@ -276,6 +285,7 @@ command: `s3-manager -v bucket list`.
 | `object upload-url URL BUCKET [--key KEY]` | Download a file from a URL and upload it to S3. Only `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp`, `.mp4` are accepted. |
 | `object set-acl BUCKET KEY [--acl public-read\|private]` | Set the ACL of one object |
 | `object file BUCKET KEY [-del\|--delete \| -ver\|--versions \| -rp\|--restore-previous \| -rbt\|--rollback-to VERSION_ID]` | With `-del`: delete the object if it exists, otherwise report that it does not exist. With `-ver`: show the number of versions and when each was created. With `-rp`: upload the second-to-last version again as a new version (needs at least 2 versions). With `-rbt VERSION_ID`: the same for any version id shown by `-ver`. Without a flag: show its size and Content-Type (exit code `1` if it does not exist). Only one flag at a time. |
+| `object old-versions BUCKET KEY [KEY...] [--months 6] [--dry-run] [-y]` | For each key: list its versions (old ones are marked), then **permanently** delete every version created more than `--months` months ago. The latest version is never deleted. Asks for confirmation unless `-y`; `--dry-run` deletes nothing. A missing key is reported and skipped (exit code `1` at the end). `--months 0` treats every non-latest version as old. |
 | `policy generate-public-read BUCKET [--prefix P ...]` | Print a public-read policy (does not change anything). With `--prefix`, only those folders are public. |
 | `policy create BUCKET` | Apply the public-read policy to the bucket |
 | `policy get BUCKET` | Show the current bucket policy |
@@ -335,6 +345,16 @@ Added for the versioning assignment:
 | `list_object_versions()` | `objects.py` | `object file -ver` |
 | `restore_previous_version()` | `objects.py` | `object file -rp` |
 
+Added for the "delete versions older than 6 months" assignment (the Catch UP 2 script has no
+such feature):
+
+| Function | Module | Used by command |
+|---|---|---|
+| `list_object_versions()` | `objects.py` | `object old-versions` (checks the versions of each file) |
+| `months_ago()` | `objects.py` | `object old-versions --months` (the cutoff date) |
+| `select_old_versions()` | `objects.py` | `object old-versions` (old versions except the latest) |
+| `delete_object_version()` | `objects.py` | `object old-versions` (permanent delete) |
+
 Added from the Catch UP 2 lecture script (lecture 4), which shows a whole argparse CLI. Its
 features were ported into the Typer commands above instead of copying the script:
 
@@ -387,7 +407,8 @@ s3-manager/
 │   ├── objects.py     # upload_file (small / large / upload_file / upload_fileobj),
 │   │                  # download_file_and_upload_to_s3, set_object_access_policy, get_objects,
 │   │                  # get_object_info, delete_object, list_object_versions, restore_previous_version,
-│   │                  # rollback_to_version, extension_folder, move_object, organize_by_extension
+│   │                  # rollback_to_version, months_ago, select_old_versions, delete_object_version,
+│   │                  # extension_folder, move_object, organize_by_extension
 │   ├── policies.py    # generate_public_read_policy, generate_multiple_policy, create_bucket_policy,
 │   │                  # read_bucket_policy
 │   └── lifecycle.py   # set_lifecycle_policy, read_lifecycle_policy, delete_lifecycle_policy
@@ -531,6 +552,19 @@ returns the newest one (`IsLatest`).
 - **Going back to any version.** `-rbt VERSION_ID` does the same `copy_object` for a version id
   chosen from the `-ver` list. `rollback_to_version()` first checks that the id belongs to this key
   and is not already the latest version, so a typo gives a clear error instead of an AWS one.
+- **Deleting old versions.** `object old-versions` lists the versions of every key it gets with
+  `list_object_versions()`, picks the ones created before the cutoff with `select_old_versions()`
+  and deletes each with `delete_object(Bucket, Key, VersionId=...)`. With a `VersionId` the version
+  is removed **for good**: no delete marker is added and it can't be restored, which is why the
+  command asks first and has `--dry-run`. This needs the `s3:DeleteObjectVersion` permission.
+  - The cutoff is "6 calendar months ago" from `months_ago()` (2026-10-19 → 2026-04-19; if the
+    day doesn't exist, the last day of the month: 08-31 → 02-28), using only the standard library.
+  - The latest version is never deleted, even if it is older than 6 months, so the file itself
+    stays and only its old history goes. In a bucket without versioning each object has one `null`
+    version, which is always the latest, so nothing is deleted there.
+  - Delete markers are not versions with content (see above), so they are left alone.
+  - A lifecycle rule with `NoncurrentVersionExpiration` could do the same automatically, but it
+    counts days from when a version *stopped* being the latest, not from its creation date.
 
 ### Organizing files by extension
 

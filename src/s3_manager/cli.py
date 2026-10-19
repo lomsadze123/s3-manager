@@ -7,6 +7,7 @@ The actual S3 work is done in buckets.py, objects.py, policies.py and lifecycle.
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -451,14 +452,77 @@ def show_object_versions(client, bucket, key):
     if not versions:
         typer.echo(f"Object 's3://{bucket}/{key}' does not exist.")
         raise typer.Exit(code=1)
+    print_versions(bucket, key, versions)
 
+
+def print_versions(bucket, key, versions, old_versions=(), old_label=""):
+    """Print the versions of one object, newest first, marking the ones in old_versions."""
     typer.echo(f"s3://{bucket}/{key} has {len(versions)} version(s):")
     for number, version in enumerate(versions, start=1):
         latest = "  (latest)" if version["is_latest"] else ""
+        old = f"  -> {old_label}" if version in old_versions else ""
         typer.echo(
             f"  {number}. created {format_date(version['created'])}, {version['size']} bytes, "
-            f"id {version['version_id']}{latest}"
+            f"id {version['version_id']}{latest}{old}"
         )
+
+
+@object_app.command("old-versions")
+def object_old_versions(
+    bucket: Annotated[str, typer.Argument(help="Bucket containing the objects.")],
+    keys: Annotated[list[str], typer.Argument(help="One or more object keys, e.g. notes/photo.jpg data.csv.")],
+    months: Annotated[
+        int,
+        typer.Option(help="Delete versions created more than this many months ago (0 = every older version)."),
+    ] = objects.DEFAULT_VERSION_MAX_AGE_MONTHS,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Only show which versions would be deleted.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+):
+    """Show the versions of each file, then permanently delete the versions created more than
+    6 months ago (--months). The latest version of a file is always kept."""
+    if months < 0:
+        typer.echo("--months can't be negative.")
+        raise typer.Exit(code=1)
+
+    client = init_client()
+    if not buckets.bucket_exists(client, bucket):
+        typer.echo(f"Bucket '{bucket}' does not exist.")
+        raise typer.Exit(code=1)
+
+    cutoff = objects.months_ago(datetime.now(timezone.utc), months)
+    cutoff_text = format_date(cutoff)
+    old_label = f"older than {months} month(s)"
+
+    missing = []
+    to_delete = []  # (key, version) pairs
+    for key in keys:
+        versions = objects.list_object_versions(client, bucket, key)
+        if not versions:
+            typer.echo(f"Object 's3://{bucket}/{key}' does not exist.")
+            missing.append(key)
+            continue
+        old = objects.select_old_versions(versions, cutoff)
+        print_versions(bucket, key, versions, old, old_label)
+        to_delete.extend((key, version) for version in old)
+
+    if not to_delete:
+        typer.echo(f"No old versions created before {cutoff_text}. Nothing to delete.")
+    elif dry_run:
+        typer.echo(f"Dry run: {len(to_delete)} version(s) created before {cutoff_text} would be deleted.")
+    else:
+        if not yes:
+            typer.confirm(
+                f"Permanently delete {len(to_delete)} version(s) created before {cutoff_text}?", abort=True
+            )
+        for key, version in to_delete:
+            objects.delete_object_version(client, bucket, key, version["version_id"])
+            typer.echo(f"Deleted version {version['version_id']} of s3://{bucket}/{key}.")
+        typer.echo(f"{len(to_delete)} old version(s) deleted.")
+
+    if missing:
+        raise typer.Exit(code=1)
 
 
 # ---------- policy commands ----------

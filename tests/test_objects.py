@@ -7,14 +7,17 @@ from botocore.exceptions import ClientError
 from s3_manager import objects
 from s3_manager.objects import (
     delete_object,
+    delete_object_version,
     download_file_and_upload_to_s3,
     extension_folder,
     get_object_info,
     get_objects,
     list_object_versions,
+    months_ago,
     organize_by_extension,
     restore_previous_version,
     rollback_to_version,
+    select_old_versions,
     set_object_access_policy,
     type_folder,
     upload_file,
@@ -492,3 +495,33 @@ def test_get_objects_empty_bucket(client):
     client.get_paginator.return_value.paginate.return_value = [{}]
 
     assert get_objects(client, "my-bucket") == []
+
+
+@pytest.mark.parametrize(
+    ("date", "months", "expected"),
+    [
+        (datetime(2026, 10, 19, 8, 0, tzinfo=timezone.utc), 6, datetime(2026, 4, 19, 8, 0, tzinfo=timezone.utc)),
+        (datetime(2026, 3, 15, tzinfo=timezone.utc), 6, datetime(2025, 9, 15, tzinfo=timezone.utc)),
+        (datetime(2026, 8, 31, tzinfo=timezone.utc), 6, datetime(2026, 2, 28, tzinfo=timezone.utc)),
+        (datetime(2028, 8, 31, tzinfo=timezone.utc), 6, datetime(2028, 2, 29, tzinfo=timezone.utc)),
+        (datetime(2026, 10, 19, tzinfo=timezone.utc), 0, datetime(2026, 10, 19, tzinfo=timezone.utc)),
+    ],
+)
+def test_months_ago(date, months, expected):
+    assert months_ago(date, months) == expected
+
+
+def test_select_old_versions_keeps_latest_and_recent():
+    cutoff = datetime(2026, 4, 19, tzinfo=timezone.utc)
+    latest_but_old = {"version_id": "v3", "created": datetime(2026, 1, 3, tzinfo=timezone.utc), "is_latest": True}
+    old = {"version_id": "v2", "created": datetime(2026, 1, 2, tzinfo=timezone.utc), "is_latest": False}
+    older = {"version_id": "v1", "created": datetime(2025, 1, 1, tzinfo=timezone.utc), "is_latest": False}
+    recent = {"version_id": "v4", "created": datetime(2026, 5, 1, tzinfo=timezone.utc), "is_latest": False}
+
+    assert select_old_versions([recent, latest_but_old, old, older], cutoff) == [old, older]
+
+
+def test_delete_object_version_deletes_permanently(client):
+    delete_object_version(client, "my-bucket", "photo.jpg", "v1")
+
+    client.delete_object.assert_called_once_with(Bucket="my-bucket", Key="photo.jpg", VersionId="v1")
