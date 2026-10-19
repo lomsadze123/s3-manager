@@ -7,6 +7,8 @@ from s3_manager.buckets import (
     ensure_bucket,
     get_bucket_versioning,
     list_buckets,
+    read_bucket_encryption,
+    set_bucket_encryption,
     set_bucket_versioning,
 )
 from tests.conftest import make_client_error
@@ -87,3 +89,30 @@ def test_set_bucket_versioning(client, enabled, status):
     client.put_bucket_versioning.assert_called_once_with(
         Bucket="my-bucket", VersioningConfiguration={"Status": status}
     )
+
+
+def test_set_bucket_encryption_uses_aes256(client):
+    set_bucket_encryption(client, "my-bucket")
+
+    client.put_bucket_encryption.assert_called_once_with(
+        Bucket="my-bucket",
+        ServerSideEncryptionConfiguration={
+            "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]
+        },
+    )
+
+
+def test_read_bucket_encryption_returns_algorithm(client):
+    client.get_bucket_encryption.return_value = {
+        "ServerSideEncryptionConfiguration": {
+            "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "aws:kms"}}]
+        }
+    }
+
+    assert read_bucket_encryption(client, "my-bucket") == "aws:kms"
+
+
+def test_read_bucket_encryption_returns_none_without_configuration(client):
+    client.get_bucket_encryption.side_effect = make_client_error("ServerSideEncryptionConfigurationNotFoundError")
+
+    assert read_bucket_encryption(client, "my-bucket") is None

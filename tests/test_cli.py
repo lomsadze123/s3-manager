@@ -12,7 +12,7 @@ runner = CliRunner()
 @pytest.fixture(autouse=True)
 def fake_client(client, monkeypatch):
     """Make every CLI command use the fake client instead of a real boto3 client."""
-    monkeypatch.setattr(cli, "init_client", lambda: client)
+    monkeypatch.setattr(cli, "init_client", lambda region=None: client)
     return client
 
 
@@ -258,3 +258,120 @@ def test_bucket_organize_reports_nothing_to_move(client):
 
     assert result.exit_code == 0
     assert "Nothing to organize" in result.output
+
+
+def test_bucket_create_with_region_and_versioning(client, monkeypatch):
+    regions = []
+
+    def fake_init_client(region=None):
+        regions.append(region)
+        client.meta.region_name = region
+        return client
+
+    monkeypatch.setattr(cli, "init_client", fake_init_client)
+
+    result = runner.invoke(cli.app, ["bucket", "create", "my-bucket", "--region", "us-west-2", "-vers"])
+
+    assert result.exit_code == 0
+    assert regions == ["us-west-2"]
+    assert "Bucket 'my-bucket' created in us-west-2." in result.output
+    client.create_bucket.assert_called_once_with(
+        Bucket="my-bucket", CreateBucketConfiguration={"LocationConstraint": "us-west-2"}
+    )
+    client.put_bucket_versioning.assert_called_once_with(
+        Bucket="my-bucket", VersioningConfiguration={"Status": "Enabled"}
+    )
+
+
+def test_bucket_create_without_versioning_flag(client):
+    result = runner.invoke(cli.app, ["bucket", "create", "my-bucket"])
+
+    assert result.exit_code == 0
+    client.put_bucket_versioning.assert_not_called()
+
+
+def test_bucket_encryption_enable_and_status(client):
+    client.get_bucket_encryption.return_value = {
+        "ServerSideEncryptionConfiguration": {
+            "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]
+        }
+    }
+
+    result = runner.invoke(cli.app, ["bucket", "encryption", "my-bucket", "--enable", "-es"])
+
+    assert result.exit_code == 0
+    assert "set to AES256" in result.output
+    assert "encrypts new objects with AES256" in result.output
+    client.put_bucket_encryption.assert_called_once()
+
+
+def test_bucket_encryption_needs_a_flag(client):
+    result = runner.invoke(cli.app, ["bucket", "encryption", "my-bucket"])
+
+    assert result.exit_code == 1
+    assert "Pass -es" in result.output
+    client.put_bucket_encryption.assert_not_called()
+
+
+def test_bucket_organize_unknown_moves_files_without_extension(client):
+    fake_root_keys(client, "README")
+
+    result = runner.invoke(cli.app, ["bucket", "organize", "my-bucket", "-ext", "--unknown"])
+
+    assert result.exit_code == 0
+    assert result.output.splitlines() == ["unknown - 1"]
+
+
+def test_object_list_shows_objects_and_total(client):
+    client.get_paginator.return_value.paginate.return_value = [{"Contents": [
+        {"Key": "a.txt", "Size": 3, "LastModified": datetime(2026, 10, 1, 12, 30, tzinfo=timezone.utc)},
+        {"Key": "dev/b.jpg", "Size": 7, "LastModified": datetime(2026, 10, 2, 12, 30, tzinfo=timezone.utc)},
+    ]}]
+
+    result = runner.invoke(cli.app, ["object", "list", "my-bucket"])
+
+    assert result.exit_code == 0
+    assert "a.txt  3 bytes  2026-10-01 12:30:00 UTC" in result.output
+    assert "2 object(s), 10 bytes in total." in result.output
+
+
+def test_object_list_empty_bucket(client):
+    client.get_paginator.return_value.paginate.return_value = [{}]
+
+    result = runner.invoke(cli.app, ["object", "list", "my-bucket"])
+
+    assert result.exit_code == 0
+    assert "No objects in s3://my-bucket/" in result.output
+
+
+def test_object_file_rbt_uploads_chosen_version(client):
+    fake_versions(client, ("v1", 1), ("v2", 2), ("v3", 3))
+    client.copy_object.return_value = {"VersionId": "v4"}
+
+    result = runner.invoke(cli.app, ["object", "file", "my-bucket", "photo.jpg", "-rbt", "v1"])
+
+    assert result.exit_code == 0
+    assert "Version v1 (created 2026-10-01 12:30:00 UTC) uploaded again as new version v4." in result.output
+
+
+def test_object_file_rejects_rbt_with_rp(client):
+    result = runner.invoke(cli.app, ["object", "file", "my-bucket", "photo.jpg", "-rp", "-rbt", "v1"])
+
+    assert result.exit_code == 1
+    assert "only one of" in result.output
+    client.copy_object.assert_not_called()
+
+
+def test_policy_create_multiple_needs_confirmation(client):
+    result = runner.invoke(cli.app, ["policy", "create-multiple", "my-bucket"], input="n\n")
+
+    assert result.exit_code == 1
+    client.put_bucket_policy.assert_not_called()
+
+
+def test_policy_create_multiple_applies_policy(client):
+    result = runner.invoke(cli.app, ["policy", "create-multiple", "my-bucket", "--yes"])
+
+    assert result.exit_code == 0
+    client.put_public_access_block.assert_called_once()
+    assert "s3:DeleteObject" in client.put_bucket_policy.call_args.kwargs["Policy"]

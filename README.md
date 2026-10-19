@@ -8,29 +8,37 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
 
 ## Features
 
-- **Buckets:** list, create, check if a bucket exists, create only if missing (`ensure`), and delete
-  only if it exists (with confirmation)
+- **Buckets:** list, create (in any region with `--region`, with versioning turned on right away
+  with `-vers`), check if a bucket exists, create only if missing (`ensure`), and delete only if it
+  exists (with confirmation)
+- **List objects:** show every object in a bucket (or one folder) with its size and date (`object list`)
 - **Uploads:** upload a local file, or download a file from a URL and upload it to S3
 - **Small and large files:** small files are sent in one `put_object` request, large files with a
   multipart upload (part by part, aborted cleanly on failure). Chosen automatically by file size
-  (default: from 100 MiB) or forced with `--method small|large`
+  (default: from 100 MiB) or forced with `--method small|large`. boto3's managed transfers are
+  available too: `--method upload_file|upload_fileobj`
 - **File type validation:** URL downloads (always) and local uploads (with `--validate-mime`) are
   checked with python-magic, only `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp` and `.mp4` are accepted
+- **Default encryption:** show a bucket's default encryption or set it to SSE-S3 / AES256
+  (`bucket encryption NAME -es --enable`)
 - **Lifecycle policy:** delete objects automatically 120 days (or any number of days) after
   creation, for the whole bucket or one folder
 - **Bucket policies:** generate a public-read policy (whole bucket or only some folders), apply it,
-  read the current policy, and apply one only if the bucket has none (`policy ensure`)
+  read the current policy, and apply one only if the bucket has none (`policy ensure`). The lecture's
+  "multiple" policy (list versions, read, change ACLs, delete) can be applied to test buckets
+  (`policy create-multiple`)
 - **Public access:** turn off *Block Public Access* and make a bucket publicly readable in one command
 - **Object ACLs:** make a single object `public-read` or `private`
 - **Delete a file:** pass the bucket, the key and the `-del` flag (`object file BUCKET KEY -del`) to
   delete one object; without the flag the command only shows its size and type
 - **Versioning:** check whether a bucket has versioning enabled (`bucket versioning NAME -vs`),
   turn it on or suspend it, list the versions of a file with their creation dates
-  (`object file BUCKET KEY -ver`), and upload the second-to-last version again as a new version
-  (`object file BUCKET KEY -rp`)
+  (`object file BUCKET KEY -ver`), and upload the second-to-last version (`-rp`) or any chosen
+  version (`-rbt VERSION_ID`) again as a new version
 - **Organize by extension:** pass the bucket and the `-ext` flag (`bucket organize NAME -ext`) to
   move every file into a folder named after its extension (`image.jpg` → `jpg/image.jpg`,
-  `demo.csv` → `csv/demo.csv`) and print how many files were moved per extension (`csv - 2`)
+  `demo.csv` → `csv/demo.csv`) and print how many files were moved per extension (`csv - 2`).
+  With `--unknown`, files without an extension go to `unknown/`
 - **Configuration** through a `.env` file (credentials are never stored in the code)
 - **Logging** of every operation, with a `--verbose` mode for debugging
 - **Readable errors** instead of Python tracebacks (e.g. `ERROR: The bucket does not exist. (NoSuchBucket)`)
@@ -153,7 +161,19 @@ poetry run s3-manager object upload ./users.csv my-unique-bucket-2026
 poetry run s3-manager bucket organize my-unique-bucket-2026 -ext   # csv - 2, jpg - 1
 poetry run s3-manager bucket organize my-unique-bucket-2026 -ext   # nothing left to move
 
-# 8. clean up (the bucket must be empty before deleting)
+# 8. extras from the Catch UP 2 lecture script
+poetry run s3-manager bucket create my-versioned-bucket-2026 --region us-west-2 -vers   # other region + versioning
+poetry run s3-manager bucket encryption my-unique-bucket-2026 --enable -es             # AES256 by default
+poetry run s3-manager object list my-unique-bucket-2026                               # every key, size, date
+poetry run s3-manager object list my-unique-bucket-2026 --prefix csv/
+poetry run s3-manager object upload ./demo.csv my-unique-bucket-2026 --method upload_file
+poetry run s3-manager object upload ./demo.csv my-unique-bucket-2026 --method upload_fileobj
+poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -ver               # copy an id
+poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -rbt <VERSION_ID>  # bring it back
+poetry run s3-manager bucket organize my-unique-bucket-2026 -ext --unknown   # README -> unknown/README
+poetry run s3-manager policy create-multiple my-unique-bucket-2026          # asks first: anyone can delete!
+
+# 9. clean up (the bucket must be empty before deleting)
 poetry run s3-manager bucket delete my-unique-bucket-2026
 ```
 
@@ -163,7 +183,7 @@ Example output:
 $ poetry run s3-manager bucket create my-unique-bucket-2026
 INFO: Creating bucket 'my-unique-bucket-2026' in region eu-central-1...
 INFO: Bucket 'my-unique-bucket-2026' created successfully.
-Bucket 'my-unique-bucket-2026' created.
+Bucket 'my-unique-bucket-2026' created in eu-central-1.
 
 $ poetry run s3-manager bucket ensure my-unique-bucket-2026
 INFO: Bucket 'my-unique-bucket-2026' already exists, skipping creation.
@@ -230,20 +250,23 @@ command: `s3-manager -v bucket list`.
 | Command | Description |
 |---|---|
 | `bucket list` | List all buckets |
-| `bucket create NAME [--enable-acl]` | Create a bucket in `AWS_REGION`. `--enable-acl` allows object ACLs. |
+| `bucket create NAME [--enable-acl] [--region R] [-vers\|--versioning]` | Create a bucket in `AWS_REGION`, or in `--region`. `--enable-acl` allows object ACLs. `-vers` enables versioning right after creating it. |
 | `bucket ensure NAME [--enable-acl]` | Create the bucket only if it does not exist, otherwise report that it exists |
 | `bucket delete NAME [-y]` | Delete an empty bucket if it exists, otherwise report that it does not exist. Asks for confirmation unless `-y` is given. |
 | `bucket exists NAME` | Check if a bucket exists (exit code `0` = yes, `1` = no) |
 | `bucket versioning NAME [-vs\|--status] [--enable\|--suspend]` | `-vs`: show whether versioning is enabled, suspended or was never enabled. `--enable` / `--suspend` change it first. |
-| `bucket organize NAME [-ext\|--by-extension]` | With `-ext`: move every file in the bucket root into a folder named after its extension (`image.jpg` → `jpg/image.jpg`) and print the number of moved files per extension (`csv - 2`). Files already in a folder and files without an extension are left alone. Without the flag: show a hint (exit code `1`). |
-| `object upload PATH BUCKET [--key KEY] [--method auto\|small\|large] [--threshold-mb 100] [--part-size-mb 10] [--validate-mime]` | Upload a local file. Key defaults to the file name. `auto` uses a multipart upload for files of at least `--threshold-mb`, otherwise one request. `--validate-mime` only accepts the media types listed below. |
+| `bucket encryption NAME [-es\|--status] [--enable]` | `--enable`: encrypt new objects by default with SSE-S3 (`AES256`). `-es`: show the default encryption algorithm. One of them is required. |
+| `bucket organize NAME [-ext\|--by-extension] [--unknown]` | With `-ext`: move every file in the bucket root into a folder named after its extension (`image.jpg` → `jpg/image.jpg`) and print the number of moved files per extension (`csv - 2`). Files already in a folder are left alone, files without an extension too unless `--unknown` is given (then they go to `unknown/`). Without the flag: show a hint (exit code `1`). |
+| `object upload PATH BUCKET [--key KEY] [--method auto\|small\|large\|upload_file\|upload_fileobj] [--threshold-mb 100] [--part-size-mb 10] [--validate-mime]` | Upload a local file. Key defaults to the file name. `auto` uses a multipart upload for files of at least `--threshold-mb`, otherwise one request. `upload_file` / `upload_fileobj` let boto3 manage the transfer. `--validate-mime` only accepts the media types listed below. |
+| `object list BUCKET [--prefix P]` | List every object (or only those under `--prefix`) with size and last change date, plus the total |
 | `object upload-url URL BUCKET [--key KEY]` | Download a file from a URL and upload it to S3. Only `.bmp`, `.jpg`, `.jpeg`, `.png`, `.webp`, `.mp4` are accepted. |
 | `object set-acl BUCKET KEY [--acl public-read\|private]` | Set the ACL of one object |
-| `object file BUCKET KEY [-del\|--delete \| -ver\|--versions \| -rp\|--restore-previous]` | With `-del`: delete the object if it exists, otherwise report that it does not exist. With `-ver`: show the number of versions and when each was created. With `-rp`: upload the second-to-last version again as a new version (needs at least 2 versions). Without a flag: show its size and Content-Type (exit code `1` if it does not exist). Only one flag at a time. |
+| `object file BUCKET KEY [-del\|--delete \| -ver\|--versions \| -rp\|--restore-previous \| -rbt\|--rollback-to VERSION_ID]` | With `-del`: delete the object if it exists, otherwise report that it does not exist. With `-ver`: show the number of versions and when each was created. With `-rp`: upload the second-to-last version again as a new version (needs at least 2 versions). With `-rbt VERSION_ID`: the same for any version id shown by `-ver`. Without a flag: show its size and Content-Type (exit code `1` if it does not exist). Only one flag at a time. |
 | `policy generate-public-read BUCKET [--prefix P ...]` | Print a public-read policy (does not change anything). With `--prefix`, only those folders are public. |
 | `policy create BUCKET` | Apply the public-read policy to the bucket |
 | `policy get BUCKET` | Show the current bucket policy |
 | `policy ensure BUCKET [--prefix P ...]` | If the bucket has no policy, turn off Block Public Access and make the given folders public (default: `dev/` and `test/`). If it has one, report it and change nothing. |
+| `policy create-multiple BUCKET [-y]` | Turn off Block Public Access and apply the lecture's multiple policy: everyone can list versions, read objects, read/change object ACLs and **delete objects**. Asks for confirmation unless `-y`. Test buckets only. |
 | `policy set-public BUCKET` | Turn off Block Public Access and apply the public-read policy |
 | `lifecycle set BUCKET [--days 120] [--prefix P]` | Delete objects `--days` days after creation (whole bucket, or only under `--prefix`). Replaces existing lifecycle rules. |
 | `lifecycle get BUCKET` | Show the current lifecycle rules |
@@ -298,6 +321,25 @@ Added for the versioning assignment:
 | `list_object_versions()` | `objects.py` | `object file -ver` |
 | `restore_previous_version()` | `objects.py` | `object file -rp` |
 
+Added from the Catch UP 2 lecture script (lecture 4), which shows a whole argparse CLI. Its
+features were ported into the Typer commands above instead of copying the script:
+
+| Function | Module | Used by command | Catch UP 2 flag |
+|---|---|---|---|
+| `init_client(region)` | `client.py` | `bucket create --region` | `-region` |
+| `set_bucket_versioning()` | `buckets.py` | `bucket create -vers` | `-cb -vers True` |
+| `set_bucket_encryption()` | `buckets.py` | `bucket encryption --enable` | `-ben` |
+| `read_bucket_encryption()` | `buckets.py` | `bucket encryption -es` | `-rben` |
+| `get_objects()` | `objects.py` | `object list` | `-lo` |
+| `upload_managed_file()` | `objects.py` | `object upload --method upload_file` | `-u_t upload_file` |
+| `upload_file_object()` | `objects.py` | `object upload --method upload_fileobj` | `-u_t upload_fileobj` |
+| `rollback_to_version()` | `objects.py` | `object file -rbt VERSION_ID` | `-r_b_t` |
+| `organize_by_extension(include_unknown=True)` | `objects.py` | `bucket organize -ext --unknown` | `-o_b` |
+| `generate_multiple_policy()` | `policies.py` | `policy create-multiple` | `-amp` |
+
+The script's `-u_t put_object` and `-u_t multipart_upload` were already here as `--method small`
+and `--method large`, and `-l_v` as `object file -ver`.
+
 Differences from the lecture code:
 
 - Functions don't `print` or return `False` on errors. They log with `logging` and let the
@@ -307,6 +349,12 @@ Differences from the lecture code:
 - The lecture's `upload_file()` always used the key `hello.txt` and its return value is `None`
   (boto3's `upload_file` returns nothing), so checking `response["ResponseMetadata"]` crashes.
   Here the key comes from the file name or `--key`, and errors are raised as exceptions.
+- Catch UP 2 bugs that are fixed here: `put_object(ExtraArgs=...)` fails (`put_object` takes
+  `ContentType=` directly), `multiple_policy` uses `"Resource": "*"`, which a bucket policy rejects
+  (here the bucket ARN and the `bucket/*` ARN), organizing lists the whole bucket and so moves
+  already sorted files again (`csv/a.csv` → `csv/csv/a.csv`), an empty bucket or an object without
+  versions crashes with `KeyError`, the multipart upload is never aborted on errors, and
+  `LocationConstraint` is always sent, which fails in `us-east-1`.
 - The lecture fixes the permissions issue with `delete_public_access_block()`. This tool uses
   `put_public_access_block()` with all four settings set to `False`, which has the same effect but
   keeps an explicit configuration on the bucket. It is a separate step (`policy set-public`,
@@ -318,13 +366,16 @@ Differences from the lecture code:
 s3-manager/
 ├── src/s3_manager/
 │   ├── cli.py         # Typer commands, logging setup, error handling
-│   ├── client.py      # init_client(): reads .env and creates the boto3 client
+│   ├── client.py      # init_client(region): reads .env and creates the boto3 client
 │   ├── buckets.py     # list_buckets, create_bucket, delete_bucket, bucket_exists,
-│   │                  # get_bucket_versioning, set_bucket_versioning
-│   ├── objects.py     # upload_file (small / large), download_file_and_upload_to_s3, set_object_access_policy,
+│   │                  # get_bucket_versioning, set_bucket_versioning,
+│   │                  # set_bucket_encryption, read_bucket_encryption
+│   ├── objects.py     # upload_file (small / large / upload_file / upload_fileobj),
+│   │                  # download_file_and_upload_to_s3, set_object_access_policy, get_objects,
 │   │                  # get_object_info, delete_object, list_object_versions, restore_previous_version,
-│   │                  # extension_folder, move_object, organize_by_extension
-│   ├── policies.py    # generate_public_read_policy, create_bucket_policy, read_bucket_policy
+│   │                  # rollback_to_version, extension_folder, move_object, organize_by_extension
+│   ├── policies.py    # generate_public_read_policy, generate_multiple_policy, create_bucket_policy,
+│   │                  # read_bucket_policy
 │   └── lifecycle.py   # set_lifecycle_policy, read_lifecycle_policy, delete_lifecycle_policy
 ├── tests/             # pytest unit tests for each module and the CLI (no AWS account needed)
 ├── .env.example       # template for the .env file
@@ -399,6 +450,24 @@ the list of part numbers and ETags, and only then does S3 join the parts into on
 then the parts are invisible in the bucket **but still stored and billed**. That's why any error
 during the upload calls `abort_multipart_upload`, which deletes the parts that were already sent.
 
+`--method upload_file` and `--method upload_fileobj` use boto3's **managed transfer** instead.
+`upload_file` takes the file path and `upload_fileobj` an open file (or any file-like object, like the
+`io.BytesIO` in `download_file_and_upload_to_s3`). boto3 then decides by itself: one request for
+small files, a multipart upload from 8 MiB, with several parts sent in parallel threads and failed
+parts retried. Less control and less to see, but less code. The Content-Type goes in
+`ExtraArgs={"ContentType": ...}`, which only these managed calls accept (`put_object` takes
+`ContentType=` directly).
+
+### Default encryption
+
+`bucket encryption NAME --enable` calls `put_bucket_encryption` with the rule
+`{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}`: S3 encrypts every new object
+with keys it manages (SSE-S3) when it stores it, and decrypts it when it is read, so downloads work
+as before. Objects that are already in the bucket are not re-encrypted. Since January 2023 AWS does
+this for every new bucket anyway, so `-es` usually shows `AES256` even without `--enable`; it shows
+`aws:kms` for buckets that use KMS keys, and "no default encryption" if AWS answers with
+`ServerSideEncryptionConfigurationNotFoundError` (e.g. some S3-compatible services).
+
 ### Lifecycle policy
 
 A lifecycle configuration is a list of rules that S3 runs on its own, without any request from us.
@@ -445,6 +514,9 @@ returns the newest one (`IsLatest`).
   the server side (nothing is downloaded), keeps its Content-Type, and stores it as a new latest
   version, so all older versions stay and the step can be undone. `copy_object` works for objects
   up to 5 GiB. With fewer than 2 versions the command stops with an error.
+- **Going back to any version.** `-rbt VERSION_ID` does the same `copy_object` for a version id
+  chosen from the `-ver` list. `rollback_to_version()` first checks that the id belongs to this key
+  and is not already the latest version, so a typo gives a clear error instead of an AWS one.
 
 ### Organizing files by extension
 
@@ -462,7 +534,8 @@ moved files per extension. The CLI prints it sorted by extension, one line each 
   All keys are listed first (with a paginator, so more than 1000 objects work) and moved afterwards.
 - **Folder name.** `extension_folder()` takes the last extension in lowercase without the dot
   (`Photo.JPG` → `jpg`, `archive.tar.gz` → `gz`). Files without an extension (`README`, `.env`) are
-  skipped and not counted.
+  skipped and not counted, unless `--unknown` is given: then they are moved to `unknown/` and
+  counted as `unknown - N` (like the Catch UP 2 script does).
 - If the target key already exists it is overwritten. In a versioned bucket the old key only gets a
   delete marker, so its versions are still there.
 
@@ -499,6 +572,12 @@ policy or ACL with `AccessDenied` while it is on. That is why `policy create` al
 bucket and `policy set-public` and `policy ensure` first turn Block Public Access off. If it is also enabled at the
 account level (S3 console → *Block Public Access settings for this account*), it must be turned off
 there as well.
+
+`policy create-multiple` applies the lecture's "multiple" policy. It has two statements, because
+bucket actions and object actions need different resources: `s3:ListBucketVersions` on
+`arn:aws:s3:::BUCKET`, and `s3:GetObject`, `s3:GetObjectAcl`, `s3:PutObjectAcl`, `s3:DeleteObject`
+on `arn:aws:s3:::BUCKET/*`. With `"Principal": "*"` this means anyone on the internet can delete the
+files, so the command asks for confirmation and is only meant for test buckets.
 
 ### Logging and errors
 
@@ -565,13 +644,20 @@ What is covered:
   an extension
 - `bucket organize`: the `csv - 2` / `jpg - 1` output, requiring `-ext`, reporting a missing bucket,
   and "Nothing to organize" when no file can be moved
+- Catch UP 2 features: `bucket create --region ... -vers` (client created for that region, then
+  versioning enabled), `put_bucket_encryption` with AES256 and reading the algorithm (or `None`),
+  `bucket encryption` requiring a flag, `--method upload_file|upload_fileobj` calling boto3's
+  managed uploads with the Content-Type, `get_objects` across pages with the prefix, `object list`
+  output and empty bucket, `-rbt` copying the chosen version and rejecting unknown or latest ids,
+  `--unknown` moving files without an extension, and the multiple policy (bucket and object ARNs,
+  confirmation before applying)
 
 I also tested all commands manually against a real AWS account.
 
 ## Possible future improvements
 
 - `bucket delete --force` to delete all objects before deleting the bucket
-- an `object list` command, and deleting several keys at once with `delete_objects`
+- deleting several keys at once with `delete_objects`
 - streaming large downloads directly to S3 instead of keeping them in memory
 - uploading a custom policy from a JSON file
 - a `--dry-run` option that shows what would happen without changing anything

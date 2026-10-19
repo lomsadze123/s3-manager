@@ -3,6 +3,7 @@ import json
 from s3_manager.policies import (
     create_bucket_policy,
     ensure_bucket_policy,
+    generate_multiple_policy,
     generate_public_read_policy,
     read_bucket_policy,
 )
@@ -60,3 +61,13 @@ def test_ensure_bucket_policy_applies_prefix_policy_when_missing(client):
     client.put_public_access_block.assert_called_once()
     sent = json.loads(client.put_bucket_policy.call_args.kwargs["Policy"])
     assert sent == generate_public_read_policy("my-bucket", ["dev", "test"])
+
+
+def test_generate_multiple_policy_uses_bucket_and_object_arns():
+    policy = generate_multiple_policy("my-bucket")
+
+    bucket_statement, object_statement = policy["Statement"]
+    assert bucket_statement["Action"] == "s3:ListBucketVersions"
+    assert bucket_statement["Resource"] == "arn:aws:s3:::my-bucket"
+    assert "s3:DeleteObject" in object_statement["Action"]
+    assert object_statement["Resource"] == "arn:aws:s3:::my-bucket/*"

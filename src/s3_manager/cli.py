@@ -54,6 +54,9 @@ AWS_ERROR_MESSAGES = {
     "EntityTooSmall": "A multipart part is smaller than 5 MiB. Use a bigger --part-size-mb.",
     "NoSuchUpload": "The multipart upload no longer exists (it was aborted or completed).",
     "InvalidArgument": "AWS rejected one of the arguments. Run with --verbose for details.",
+    "InvalidLocationConstraint": "Unknown region. Use a region name like eu-central-1.",
+    "IllegalLocationConstraintException": "The region does not match the S3 endpoint. Check --region and S3_ENDPOINT_URL.",
+    "OperationAborted": "Another request is changing this bucket right now, try again in a moment.",
 }
 
 
@@ -116,10 +119,21 @@ def bucket_create(
     enable_acl: Annotated[
         bool, typer.Option("--enable-acl", help="Allow object ACLs (needed for 'object set-acl').")
     ] = False,
+    region: Annotated[
+        Optional[str],
+        typer.Option(help="Region to create the bucket in, e.g. eu-central-1. Default: AWS_REGION from .env."),
+    ] = None,
+    versioning: Annotated[
+        bool, typer.Option("-vers", "--versioning", help="Enable versioning right after creating the bucket.")
+    ] = False,
 ):
-    """Create a new bucket."""
-    buckets.create_bucket(init_client(), name, enable_acl=enable_acl)
-    typer.echo(f"Bucket '{name}' created.")
+    """Create a new bucket, optionally in another region and with versioning enabled."""
+    client = init_client(region=region)
+    buckets.create_bucket(client, name, enable_acl=enable_acl)
+    typer.echo(f"Bucket '{name}' created in {client.meta.region_name}.")
+    if versioning:
+        buckets.set_bucket_versioning(client, name, enabled=True)
+        typer.echo(f"Versioning of bucket '{name}' enabled.")
 
 
 @bucket_app.command("delete")
@@ -200,6 +214,37 @@ def bucket_versioning(
         typer.echo(VERSIONING_MESSAGES[buckets.get_bucket_versioning(client, name)].format(name=name))
 
 
+@bucket_app.command("encryption")
+def bucket_encryption(
+    name: Annotated[str, typer.Argument(help="Name of the bucket.")],
+    status: Annotated[
+        bool, typer.Option("-es", "--status", help="Show the default encryption of the bucket.")
+    ] = False,
+    enable: Annotated[
+        bool, typer.Option("--enable", help="Encrypt new objects by default with SSE-S3 (AES256).")
+    ] = False,
+):
+    """Show the default encryption of a bucket with -es, or set it to AES256 with --enable."""
+    if not (status or enable):
+        typer.echo("Pass -es to show the default encryption, or --enable to set it to AES256.")
+        raise typer.Exit(code=1)
+
+    client = init_client()
+    if not buckets.bucket_exists(client, name):
+        typer.echo(f"Bucket '{name}' does not exist.")
+        raise typer.Exit(code=1)
+
+    if enable:
+        buckets.set_bucket_encryption(client, name)
+        typer.echo(f"Default encryption of bucket '{name}' set to AES256.")
+    if status:
+        algorithm = buckets.read_bucket_encryption(client, name)
+        if algorithm is None:
+            typer.echo(f"Bucket '{name}' has no default encryption.")
+        else:
+            typer.echo(f"Bucket '{name}' encrypts new objects with {algorithm}.")
+
+
 @bucket_app.command("organize")
 def bucket_organize(
     name: Annotated[str, typer.Argument(help="Name of the bucket.")],
@@ -208,6 +253,10 @@ def bucket_organize(
         typer.Option(
             "-ext", "--by-extension", help="Move each file into a folder named after its extension."
         ),
+    ] = False,
+    unknown: Annotated[
+        bool,
+        typer.Option("--unknown", help=f"Move files without an extension to {objects.UNKNOWN_FOLDER}/ instead of skipping them."),
     ] = False,
 ):
     """Move the files in the bucket root into folders by extension with -ext
@@ -221,9 +270,10 @@ def bucket_organize(
         typer.echo(f"Bucket '{name}' does not exist.")
         raise typer.Exit(code=1)
 
-    counts = objects.organize_by_extension(client, name)
+    counts = objects.organize_by_extension(client, name, include_unknown=unknown)
     if not counts:
-        typer.echo("Nothing to organize: no files with an extension in the bucket root.")
+        what = "no files" if unknown else "no files with an extension"
+        typer.echo(f"Nothing to organize: {what} in the bucket root.")
         return
     for extension, count in sorted(counts.items()):
         typer.echo(f"{extension} - {count}")
@@ -243,7 +293,8 @@ def object_upload(
     method: Annotated[
         str,
         typer.Option(
-            help="'small' = one request, 'large' = multipart upload, 'auto' = choose by file size."
+            help="'small' = one put_object request, 'large' = own multipart upload, 'auto' = choose by "
+            "file size, 'upload_file' / 'upload_fileobj' = boto3 managed transfer."
         ),
     ] = "auto",
     threshold_mb: Annotated[
@@ -272,6 +323,26 @@ def object_upload(
         validate_mime=validate_mime,
     )
     typer.echo(f"Uploaded to s3://{bucket}/{key} ({used_method} upload)")
+
+
+@object_app.command("list")
+def object_list(
+    bucket: Annotated[str, typer.Argument(help="Bucket to list.")],
+    prefix: Annotated[str, typer.Option(help="Only list objects under this folder, e.g. dev/.")] = "",
+):
+    """List the objects in a bucket with their size and last change date."""
+    client = init_client()
+    if not buckets.bucket_exists(client, bucket):
+        typer.echo(f"Bucket '{bucket}' does not exist.")
+        raise typer.Exit(code=1)
+
+    items = objects.get_objects(client, bucket, prefix=prefix)
+    if not items:
+        typer.echo(f"No objects in s3://{bucket}/{prefix}.")
+        return
+    for item in items:
+        typer.echo(f"{item['key']}  {item['size']} bytes  {format_date(item['modified'])}")
+    typer.echo(f"{len(items)} object(s), {sum(item['size'] for item in items)} bytes in total.")
 
 
 @object_app.command("upload-url")
@@ -312,11 +383,17 @@ def object_file(
             "-rp", "--restore-previous", help="Upload the second-to-last version again as a new version."
         ),
     ] = False,
+    rollback_to: Annotated[
+        Optional[str],
+        typer.Option(
+            "-rbt", "--rollback-to", help="Upload the version with this id again as a new version (ids: -ver)."
+        ),
+    ] = None,
 ):
     """Show the size and type of an object, list its versions with -ver, upload its previous
-    version again with -rp, or delete it with -del."""
-    if delete + versions + restore_previous > 1:
-        typer.echo("Use only one of -del, -ver and -rp at a time.")
+    version again with -rp (or any version with -rbt VERSION_ID), or delete it with -del."""
+    if delete + versions + restore_previous + bool(rollback_to) > 1:
+        typer.echo("Use only one of -del, -ver, -rp and -rbt at a time.")
         raise typer.Exit(code=1)
 
     client = init_client()
@@ -327,10 +404,13 @@ def object_file(
     if versions:
         show_object_versions(client, bucket, key)
         return
-    if restore_previous:
-        previous, new_version_id = objects.restore_previous_version(client, bucket, key)
+    if restore_previous or rollback_to:
+        if rollback_to:
+            source, new_version_id = objects.rollback_to_version(client, bucket, key, rollback_to)
+        else:
+            source, new_version_id = objects.restore_previous_version(client, bucket, key)
         typer.echo(
-            f"Version {previous['version_id']} (created {format_date(previous['created'])}) "
+            f"Version {source['version_id']} (created {format_date(source['created'])}) "
             f"uploaded again as new version {new_version_id}."
         )
         return
@@ -420,6 +500,24 @@ def policy_ensure(
         typer.echo(f"Bucket '{bucket}' had no policy. Applied public-read policy for: {folders}")
     else:
         typer.echo(f"Bucket '{bucket}' already has a policy. Nothing changed.")
+
+
+@policy_app.command("create-multiple")
+def policy_create_multiple(
+    bucket: Annotated[str, typer.Argument(help="Bucket to apply the policy to.")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+):
+    """Turn off Block Public Access and let everyone list versions, read objects, change object
+    ACLs and DELETE objects (the lecture's multiple_policy). Only for test buckets."""
+    if not yes:
+        typer.confirm(
+            f"Anyone on the internet will be able to read AND delete the files in '{bucket}'. Continue?",
+            abort=True,
+        )
+    client = init_client()
+    policies.disable_block_public_access(client, bucket)
+    policies.create_bucket_policy(client, bucket, policies.generate_multiple_policy(bucket))
+    typer.echo(f"Multiple-permissions policy applied to '{bucket}'.")
 
 
 @policy_app.command("set-public")

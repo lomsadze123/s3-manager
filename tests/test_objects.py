@@ -10,9 +10,11 @@ from s3_manager.objects import (
     download_file_and_upload_to_s3,
     extension_folder,
     get_object_info,
+    get_objects,
     list_object_versions,
     organize_by_extension,
     restore_previous_version,
+    rollback_to_version,
     set_object_access_policy,
     upload_file,
     upload_large_file,
@@ -63,6 +65,21 @@ def test_upload_file_auto_uses_multipart_from_threshold(client, tmp_path, small_
     assert (key, method) == ("big/data.bin", "large")
     client.put_object.assert_not_called()
     client.complete_multipart_upload.assert_called_once()
+
+
+@pytest.mark.parametrize("method", ["upload_file", "upload_fileobj"])
+def test_upload_file_managed_methods(client, tmp_path, method):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"fake image")
+
+    key, used_method = upload_file(client, photo, "my-bucket", method=method)
+
+    assert (key, used_method) == ("photo.jpg", method)
+    boto3_call = getattr(client, method)
+    boto3_call.assert_called_once()
+    assert boto3_call.call_args.args[1:] == ("my-bucket", "photo.jpg")
+    assert boto3_call.call_args.kwargs == {"ExtraArgs": {"ContentType": "image/jpeg"}}
+    client.put_object.assert_not_called()
 
 
 def test_upload_large_file_sends_parts_in_order(client, tmp_path, small_parts):
@@ -300,6 +317,37 @@ def test_restore_previous_version_copies_second_to_last(client):
     )
 
 
+def test_rollback_to_version_copies_chosen_version(client):
+    fake_versions(
+        client,
+        {"Versions": [
+            version("photo.jpg", "v3", 3, is_latest=True),
+            version("photo.jpg", "v2", 2),
+            version("photo.jpg", "v1", 1),
+        ]},
+    )
+    client.copy_object.return_value = {"VersionId": "v4"}
+
+    source, new_version_id = rollback_to_version(client, "my-bucket", "photo.jpg", "v1")
+
+    assert (source["version_id"], new_version_id) == ("v1", "v4")
+    client.copy_object.assert_called_once_with(
+        Bucket="my-bucket",
+        Key="photo.jpg",
+        CopySource={"Bucket": "my-bucket", "Key": "photo.jpg", "VersionId": "v1"},
+    )
+
+
+@pytest.mark.parametrize("version_id, error", [("missing", "has no version"), ("v2", "already the latest")])
+def test_rollback_to_version_rejects_bad_versions(client, version_id, error):
+    fake_versions(client, {"Versions": [version("photo.jpg", "v2", 2, is_latest=True), version("photo.jpg", "v1", 1)]})
+
+    with pytest.raises(ValueError, match=error):
+        rollback_to_version(client, "my-bucket", "photo.jpg", version_id)
+
+    client.copy_object.assert_not_called()
+
+
 def test_restore_previous_version_needs_two_versions(client):
     fake_versions(client, {"Versions": [version("photo.jpg", "null", 1, is_latest=True)]})
 
@@ -364,3 +412,34 @@ def test_organize_by_extension_empty_bucket(client):
 
     assert organize_by_extension(client, "my-bucket") == {}
     client.copy_object.assert_not_called()
+
+
+def test_organize_by_extension_moves_files_without_extension_to_unknown(client):
+    fake_root_keys(client, "README", "image.jpg")
+
+    counts = organize_by_extension(client, "my-bucket", include_unknown=True)
+
+    assert counts == {"unknown": 1, "jpg": 1}
+    assert client.copy_object.call_args_list[0] == call(
+        Bucket="my-bucket", Key="unknown/README", CopySource={"Bucket": "my-bucket", "Key": "README"}
+    )
+
+
+def test_get_objects_lists_all_pages_sorted(client):
+    modified = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    client.get_paginator.return_value.paginate.return_value = [
+        {"Contents": [{"Key": "b.txt", "Size": 2, "LastModified": modified}]},
+        {"Contents": [{"Key": "a.txt", "Size": 1, "LastModified": modified}]},
+    ]
+
+    items = get_objects(client, "my-bucket", prefix="/dev/")
+
+    assert [item["key"] for item in items] == ["a.txt", "b.txt"]
+    assert items[0] == {"key": "a.txt", "size": 1, "modified": modified}
+    client.get_paginator.return_value.paginate.assert_called_once_with(Bucket="my-bucket", Prefix="dev/")
+
+
+def test_get_objects_empty_bucket(client):
+    client.get_paginator.return_value.paginate.return_value = [{}]
+
+    assert get_objects(client, "my-bucket") == []

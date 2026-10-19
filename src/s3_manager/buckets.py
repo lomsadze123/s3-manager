@@ -1,4 +1,4 @@
-"""Bucket operations: list, create, delete, check existence."""
+"""Bucket operations: list, create, delete, check existence, versioning and default encryption."""
 
 import logging
 
@@ -81,3 +81,34 @@ def set_bucket_versioning(client, name, enabled=True):
     logger.info("Setting versioning of bucket '%s' to %s...", name, status)
     client.put_bucket_versioning(Bucket=name, VersioningConfiguration={"Status": status})
     logger.info("Versioning of bucket '%s' is now %s.", name, status)
+
+
+def set_bucket_encryption(client, name, algorithm="AES256"):
+    """Encrypt every new object in the bucket by default with SSE-S3 (AES256).
+
+    S3 encrypts the objects when it stores them and decrypts them when they are read, so
+    nothing changes for the user. Objects that are already in the bucket are not re-encrypted.
+    Since January 2023 AWS does this for every new bucket anyway; this call makes it explicit.
+    """
+    logger.info("Setting default encryption of bucket '%s' to %s...", name, algorithm)
+    client.put_bucket_encryption(
+        Bucket=name,
+        ServerSideEncryptionConfiguration={
+            "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": algorithm}}]
+        },
+    )
+    logger.info("Default encryption set.")
+
+
+def read_bucket_encryption(client, name):
+    """Return the default encryption algorithm of a bucket (e.g. "AES256" or "aws:kms"),
+    or None if the bucket has no default encryption configured."""
+    logger.info("Reading default encryption of bucket '%s'...", name)
+    try:
+        response = client.get_bucket_encryption(Bucket=name)
+    except ClientError as error:
+        if error.response["Error"]["Code"] == "ServerSideEncryptionConfigurationNotFoundError":
+            return None
+        raise
+    rules = response["ServerSideEncryptionConfiguration"]["Rules"]
+    return rules[0]["ApplyServerSideEncryptionByDefault"]["SSEAlgorithm"]

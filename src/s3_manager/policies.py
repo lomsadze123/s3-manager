@@ -34,6 +34,36 @@ def generate_public_read_policy(bucket, prefixes=None):
     }
 
 
+def generate_multiple_policy(bucket):
+    """Return a bucket policy (as a dict) that gives everyone several permissions at once.
+
+    Based on the lecture's multiple_policy: anyone may list the object versions, read objects,
+    read and change object ACLs, and delete objects. Bucket-level actions (ListBucketVersions)
+    need the bucket ARN, object-level actions need the bucket/* ARN, so there are two statements.
+
+    Only for experiments: with this policy anyone on the internet can delete the files.
+    """
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "PublicListBucketVersions",
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "s3:ListBucketVersions",
+                "Resource": f"arn:aws:s3:::{bucket}",
+            },
+            {
+                "Sid": "PublicObjectAccess",
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["s3:GetObject", "s3:GetObjectAcl", "s3:PutObjectAcl", "s3:DeleteObject"],
+                "Resource": f"arn:aws:s3:::{bucket}/*",
+            },
+        ],
+    }
+
+
 def create_bucket_policy(client, bucket, policy=None):
     """Apply a bucket policy. Uses the public-read policy if none is given."""
     policy = policy or generate_public_read_policy(bucket)

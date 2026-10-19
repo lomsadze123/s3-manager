@@ -1,4 +1,4 @@
-"""Object operations: uploading, inspecting, moving and deleting files, and setting object access."""
+"""Object operations: uploading, listing, inspecting, moving, deleting and restoring files, and setting object access."""
 
 import io
 import logging
@@ -25,7 +25,8 @@ MIN_PART_SIZE = 5 * MIB
 MAX_PARTS = 10_000
 DEFAULT_PART_SIZE = 10 * MIB
 DEFAULT_MULTIPART_THRESHOLD = 100 * MIB  # AWS recommends multipart uploads from about 100 MB
-UPLOAD_METHODS = ("auto", "small", "large")
+UPLOAD_METHODS = ("auto", "small", "large", "upload_file", "upload_fileobj")
+UNKNOWN_FOLDER = "unknown"
 
 # File types accepted by download_file_and_upload_to_s3 and by upload_file(validate_mime=True):
 # detected MIME type -> valid extensions. The first extension is added to keys that have none.
@@ -53,9 +54,11 @@ def upload_file(
     """Upload a local file to a bucket. Returns (key, method) with the method that was used.
 
     method:
-        "small" - one put_object request (upload_small_file)
-        "large" - multipart upload in parts of part_size bytes (upload_large_file)
-        "auto"  - "large" if the file is at least threshold bytes, otherwise "small"
+        "small"          - one put_object request (upload_small_file)
+        "large"          - multipart upload in parts of part_size bytes (upload_large_file)
+        "auto"           - "large" if the file is at least threshold bytes, otherwise "small"
+        "upload_file"    - boto3's managed upload_file, given the file path (upload_managed_file)
+        "upload_fileobj" - boto3's managed upload_fileobj, given an open file (upload_file_object)
 
     If no key is given, the file name is used. The Content-Type comes from the file extension,
     or from the file content if the extension is unknown. With validate_mime=True the type is
@@ -84,8 +87,12 @@ def upload_file(
 
     if method == "small":
         upload_small_file(client, path, bucket, key, content_type)
-    else:
+    elif method == "large":
         upload_large_file(client, path, bucket, key, content_type, part_size=part_size)
+    elif method == "upload_file":
+        upload_managed_file(client, path, bucket, key, content_type)
+    else:
+        upload_file_object(client, path, bucket, key, content_type)
     return key, method
 
 
@@ -152,7 +159,30 @@ def upload_large_file(client, path, bucket, key, content_type=DEFAULT_CONTENT_TY
         logger.warning("Upload failed, aborting the multipart upload so no parts are left behind.")
         client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
         raise
+    logger.info("Upload finished.")
 
+
+def upload_managed_file(client, path, bucket, key, content_type=DEFAULT_CONTENT_TYPE):
+    """Upload a file with boto3's upload_file, which takes the path of the file.
+
+    This is a "managed transfer": boto3 itself decides between one request and a multipart
+    upload (from 8 MiB by default), sends the parts in several threads and retries failed ones.
+    Extra settings like the Content-Type go in ExtraArgs.
+    """
+    logger.info("Uploading '%s' to s3://%s/%s with upload_file...", path, bucket, key)
+    client.upload_file(str(path), bucket, key, ExtraArgs={"ContentType": content_type})
+    logger.info("Upload finished.")
+
+
+def upload_file_object(client, path, bucket, key, content_type=DEFAULT_CONTENT_TYPE):
+    """Upload a file with boto3's upload_fileobj, which takes an open file in binary mode.
+
+    Same managed transfer as upload_file, but it reads from any file-like object, so it also
+    works for data that is not on disk (e.g. io.BytesIO, see download_file_and_upload_to_s3).
+    """
+    logger.info("Uploading '%s' to s3://%s/%s with upload_fileobj...", path, bucket, key)
+    with open(path, "rb") as file:
+        client.upload_fileobj(file, bucket, key, ExtraArgs={"ContentType": content_type})
     logger.info("Upload finished.")
 
 
@@ -230,6 +260,21 @@ def set_object_access_policy(client, bucket, key, acl="public-read"):
     logger.info("ACL updated.")
 
 
+def get_objects(client, bucket, prefix=""):
+    """Return every object in the bucket (optionally only under a folder), sorted by key.
+
+    Each item is {"key", "size", "modified"}. list_objects_v2 returns at most 1000 keys per
+    request, so a paginator is used to get all of them. An empty bucket gives an empty list.
+    """
+    logger.info("Listing objects in s3://%s/%s...", bucket, prefix)
+    items = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix.lstrip("/")):
+        for item in page.get("Contents", []):
+            items.append({"key": item["Key"], "size": item["Size"], "modified": item["LastModified"]})
+    return sorted(items, key=lambda item: item["key"])
+
+
 def get_object_info(client, bucket, key):
     """Return the size and Content-Type of an object, or None if it does not exist."""
     try:
@@ -297,14 +342,39 @@ def restore_previous_version(client, bucket, key):
         )
 
     previous = versions[1]
-    logger.info("Copying version %s of s3://%s/%s as a new version...", previous["version_id"], bucket, key)
+    return previous, copy_version_as_latest(client, bucket, key, previous["version_id"])
+
+
+def rollback_to_version(client, bucket, key, version_id):
+    """Upload a chosen version of an object again, as a new (latest) version.
+
+    Same as restore_previous_version, but for any version id (see 'object file -ver').
+    Returns (source_version, new_version_id). Raises ValueError if the version does not exist
+    or is already the latest one.
+    """
+    versions = list_object_versions(client, bucket, key)
+    source = next((version for version in versions if version["version_id"] == version_id), None)
+    if source is None:
+        raise ValueError(
+            f"s3://{bucket}/{key} has no version '{version_id}'. "
+            f"List the versions with 'object file {bucket} {key} -ver'."
+        )
+    if source["is_latest"]:
+        raise ValueError(f"Version '{version_id}' is already the latest version of s3://{bucket}/{key}.")
+
+    return source, copy_version_as_latest(client, bucket, key, version_id)
+
+
+def copy_version_as_latest(client, bucket, key, version_id):
+    """Copy an old version of an object onto the same key and return the new version id."""
+    logger.info("Copying version %s of s3://%s/%s as a new version...", version_id, bucket, key)
     response = client.copy_object(
         Bucket=bucket,
         Key=key,
-        CopySource={"Bucket": bucket, "Key": key, "VersionId": previous["version_id"]},
+        CopySource={"Bucket": bucket, "Key": key, "VersionId": version_id},
     )
     logger.info("New version created.")
-    return previous, response.get("VersionId")
+    return response.get("VersionId")
 
 
 def extension_folder(key):
@@ -331,11 +401,12 @@ def move_object(client, bucket, key, new_key):
     client.delete_object(Bucket=bucket, Key=key)
 
 
-def organize_by_extension(client, bucket):
+def organize_by_extension(client, bucket, include_unknown=False):
     """Move every file in the bucket root into a folder named after its extension.
 
-    image.jpg -> jpg/image.jpg, demo.csv -> csv/demo.csv. Objects already inside a folder and
-    files without an extension are left alone, so running it again changes nothing.
+    image.jpg -> jpg/image.jpg, demo.csv -> csv/demo.csv. Objects already inside a folder are
+    left alone, so running it again changes nothing. Files without an extension are skipped,
+    or moved to unknown/ with include_unknown=True (README -> unknown/README).
     Returns a Counter with the number of moved files per extension, e.g. {"csv": 2, "jpg": 1}.
 
     If a key like csv/demo.csv already exists it is overwritten. In a versioned bucket the old
@@ -351,7 +422,7 @@ def organize_by_extension(client, bucket):
 
     counts = Counter()
     for key in keys:
-        folder = extension_folder(key)
+        folder = extension_folder(key) or (UNKNOWN_FOLDER if include_unknown else None)
         if folder is None:
             logger.info("Skipping '%s': it has no extension.", key)
             continue

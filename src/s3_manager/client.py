@@ -14,8 +14,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_REGION = "us-east-1"
 
 
-def init_client():
+def init_client(region=None):
     """Create a boto3 S3 client using settings from the environment / .env file.
+
+    region overrides AWS_REGION, e.g. to create a bucket in another region. A create_bucket
+    request should be sent to the endpoint of the bucket's region, otherwise S3 can answer with
+    IllegalLocationConstraintException, so the client is created for that region.
 
     Environment variables:
         AWS_ACCESS_KEY_ID      - access key (required unless using an AWS profile)
@@ -26,7 +30,7 @@ def init_client():
     """
     load_dotenv(find_dotenv(usecwd=True))
 
-    region = os.getenv("AWS_REGION") or DEFAULT_REGION
+    region = region or os.getenv("AWS_REGION") or DEFAULT_REGION
     endpoint_url = os.getenv("S3_ENDPOINT_URL") or None
 
     logger.debug("Creating S3 client (region=%s, endpoint=%s)", region, endpoint_url or "AWS default")
