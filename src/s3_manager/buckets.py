@@ -1,4 +1,4 @@
-"""Bucket operations: list, create, delete, check existence, versioning and default encryption."""
+"""Bucket operations: list, create, delete, check existence and region, versioning and default encryption."""
 
 import logging
 
@@ -50,6 +50,19 @@ def bucket_exists(client, name):
         if error.response["Error"]["Code"] in ("404", "NoSuchBucket"):
             return False
         raise
+
+
+def get_bucket_region(client, name):
+    """Return the region a bucket lives in, e.g. "eu-central-1".
+
+    AWS answers None for us-east-1 and "EU" for buckets created long ago in eu-west-1.
+    """
+    location = client.get_bucket_location(Bucket=name).get("LocationConstraint")
+    if location is None:
+        return "us-east-1"
+    if location == "EU":
+        return "eu-west-1"
+    return location
 
 
 def ensure_bucket(client, name, enable_acl=False):

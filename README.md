@@ -48,6 +48,10 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   move every file into a folder named after its extension (`image.jpg` → `jpg/image.jpg`,
   `demo.csv` → `csv/demo.csv`) and print how many files were moved per extension (`csv - 2`).
   With `--unknown`, files without an extension go to `unknown/`
+- **Static website hosting:** `host deploy BUCKET PATH` turns a bucket into a public website in one
+  step (create the bucket if needed, public-read policy, website hosting, upload) and prints the URL.
+  It works for a single `index.html` and for a built React app (`--spa`). Every file gets the right
+  `Content-Type` and `Cache-Control`. `host config`, `host upload` and `host status` do the single steps
 - **Configuration** through a `.env` file (credentials are never stored in the code)
 - **Logging** of every operation, with a `--verbose` mode for debugging
 - **Readable errors** instead of Python tracebacks (e.g. `ERROR: The bucket does not exist. (NoSuchBucket)`)
@@ -66,6 +70,7 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
 | [python-magic](https://github.com/ahupp/python-magic) | detects the real file type of downloads and `--by-type` uploads (wrapper around the `libmagic` C library) |
 | `logging` (standard library) | operation logs |
 | [pytest](https://docs.pytest.org/) | unit tests |
+| [Node.js](https://nodejs.org/) + [Vite](https://vite.dev/) + [React](https://react.dev/) | only for building the React demo site in `static_web_page/react-app/` |
 
 ## Installation
 
@@ -189,7 +194,14 @@ poetry run s3-manager object file my-unique-bucket-2026 notes/photo.jpg -rbt <VE
 poetry run s3-manager bucket organize my-unique-bucket-2026 -ext --unknown   # README -> unknown/README
 poetry run s3-manager policy create-multiple my-unique-bucket-2026          # asks first: anyone can delete!
 
-# 9. clean up (the bucket must be empty before deleting)
+# 9. host a static website (see "Static website hosting" below)
+poetry run s3-manager host deploy beka-site-2026 static_web_page/index.html   # page with my name
+cd static_web_page/react-app && npm install && npm run build && cd ../..       # React -> dist/
+poetry run s3-manager host deploy beka-react-2026 static_web_page/react-app/dist --spa
+poetry run s3-manager host status beka-react-2026
+poetry run s3-manager host config beka-react-2026 --disable                    # website off again
+
+# 10. clean up (the bucket must be empty before deleting)
 poetry run s3-manager bucket delete my-unique-bucket-2026
 ```
 
@@ -252,6 +264,21 @@ INFO: Moving s3://my-unique-bucket-2026/users.csv to csv/users.csv...
 csv - 2
 jpg - 1
 
+$ poetry run s3-manager host deploy beka-site-2026 static_web_page/index.html
+INFO: Creating bucket 'beka-site-2026' in region us-east-1...
+INFO: Bucket 'beka-site-2026' created successfully.
+INFO: Disabling Block Public Access for 'beka-site-2026'...
+INFO: Applying bucket policy to 'beka-site-2026'...
+INFO: Bucket policy applied.
+INFO: Turning on static website hosting for 'beka-site-2026'...
+INFO: Static website hosting turned on.
+INFO: Uploading static_web_page/index.html to s3://beka-site-2026/index.html (text/html; charset=utf-8)...
+Uploaded 1 file(s) to 'beka-site-2026'.
+Website: http://beka-site-2026.s3-website-us-east-1.amazonaws.com
+
+$ poetry run s3-manager host deploy beka-react-2026 static_web_page/react-app
+ERROR: No index.html in 'static_web_page/react-app'. React project? Run 'npm run build' first and pass the dist/ folder.
+
 $ poetry run s3-manager object upload-url https://www.python.org/ my-unique-bucket-2026
 INFO: Downloading https://www.python.org/...
 INFO: Downloaded 52508 bytes, detected type: text/html.
@@ -295,6 +322,10 @@ command: `s3-manager -v bucket list`.
 | `lifecycle set BUCKET [--days 120] [--prefix P]` | Delete objects `--days` days after creation (whole bucket, or only under `--prefix`). Replaces existing lifecycle rules. |
 | `lifecycle get BUCKET` | Show the current lifecycle rules |
 | `lifecycle delete BUCKET [-y]` | Remove all lifecycle rules (asks for confirmation unless `-y`) |
+| `host deploy BUCKET PATH [--spa] [--region R]` | Host a website in one step: create the bucket if it does not exist, turn off Block Public Access, apply a public-read policy for the whole bucket (**replaces** an existing bucket policy), turn on website hosting, upload, print the URL. PATH is an `index.html` or a folder with `index.html` at the top (a React app: its `dist/` folder). `--spa` also shows `index.html` for unknown paths. |
+| `host config BUCKET (--enable\|--disable) [--spa]` | Only turn website hosting on (index document `index.html`) or off. Files and policy are not changed. |
+| `host upload BUCKET PATH [--prefix P]` | Only upload a website file or folder (subfolders kept) with the right Content-Type and Cache-Control |
+| `host status BUCKET` | Show whether website hosting is on, its index and error page, and the website URL |
 
 Every command has its own help, e.g. `poetry run s3-manager object upload --help`.
 
@@ -371,6 +402,20 @@ features were ported into the Typer commands above instead of copying the script
 | `organize_by_extension(include_unknown=True)` | `objects.py` | `bucket organize -ext --unknown` | `-o_b` |
 | `generate_multiple_policy()` | `policies.py` | `policy create-multiple` | `-amp` |
 
+Added for the static website assignment, based on the lecture 5 catch-up script
+(`host_static/host_web_configuration.py` and `host_static/host_web_page_files.py`):
+
+| Function | Module | Used by command | Lecture 5 flag |
+|---|---|---|---|
+| `set_bucket_website_policy()` | `website.py` | `host config --enable/--disable`, `host deploy` | `host --website_configuration True` |
+| `static_web_page_file()` | `website.py` | `host upload`, `host deploy` | `host --host_static index.html` |
+| `read_bucket_website()` | `website.py` | `host status` | – |
+| `website_content_type()`, `cache_control()` | `website.py` | headers of every uploaded file | – |
+| `website_url()`, `get_bucket_region()` | `website.py`, `buckets.py` | prints the website address | – |
+| `host_static_website()` | `website.py` | `host deploy` (all steps at once) | – |
+
+The lecture's `bucket --assign_read_policy` step is `create_bucket_policy()`, which already existed.
+
 The script's `-u_t put_object` and `-u_t multipart_upload` were already here as `--method small`
 and `--method large`, and `-l_v` as `object file -ver`.
 
@@ -389,6 +434,12 @@ Differences from the lecture code:
   already sorted files again (`csv/a.csv` → `csv/csv/a.csv`), an empty bucket or an object without
   versions crashes with `KeyError`, the multipart upload is never aborted on errors, and
   `LocationConstraint` is always sent, which fails in `us-east-1`.
+- Lecture 5 static site bugs that are fixed here: only `.html` and `.css` files are uploaded, so a
+  React build loses its `.js`, `.svg` and `.json` files without any message; python-magic says
+  `text/plain` for CSS and JavaScript (here the extension decides); the URL always uses
+  `s3-website-REGION`, which is wrong for newer regions like `eu-central-1`
+  (`s3-website.eu-central-1`); the region comes from an env variable instead of the bucket; and there
+  is no error document, so a React app can't handle unknown paths.
 - The lecture fixes the permissions issue with `delete_public_access_block()`. This tool uses
   `put_public_access_block()` with all four settings set to `False`, which has the same effect but
   keeps an explicit configuration on the bucket. It is a separate step (`policy set-public`,
@@ -401,7 +452,7 @@ s3-manager/
 ├── src/s3_manager/
 │   ├── cli.py         # Typer commands, logging setup, error handling
 │   ├── client.py      # init_client(region): reads .env and creates the boto3 client
-│   ├── buckets.py     # list_buckets, create_bucket, delete_bucket, bucket_exists,
+│   ├── buckets.py     # list_buckets, create_bucket, delete_bucket, bucket_exists, get_bucket_region,
 │   │                  # get_bucket_versioning, set_bucket_versioning,
 │   │                  # set_bucket_encryption, read_bucket_encryption
 │   ├── objects.py     # upload_file (small / large / upload_file / upload_fileobj),
@@ -411,7 +462,12 @@ s3-manager/
 │   │                  # extension_folder, move_object, organize_by_extension
 │   ├── policies.py    # generate_public_read_policy, generate_multiple_policy, create_bucket_policy,
 │   │                  # read_bucket_policy
-│   └── lifecycle.py   # set_lifecycle_policy, read_lifecycle_policy, delete_lifecycle_policy
+│   ├── lifecycle.py   # set_lifecycle_policy, read_lifecycle_policy, delete_lifecycle_policy
+│   └── website.py     # set_bucket_website_policy, read_bucket_website, static_web_page_file,
+│                      # website_content_type, cache_control, website_url, host_static_website
+├── static_web_page/
+│   ├── index.html     # the simple site: a page with my first and last name
+│   └── react-app/     # the React demo (Vite): npm install && npm run build -> dist/
 ├── tests/             # pytest unit tests for each module and the CLI (no AWS account needed)
 ├── .env.example       # template for the .env file
 ├── pyproject.toml     # project metadata and dependencies
@@ -426,7 +482,7 @@ The code is split into three simple layers:
 
 1. **`cli.py`** is the only part that talks to the user. It parses arguments, asks for confirmation,
    prints results and turns errors into short messages.
-2. **`buckets.py`, `objects.py`, `policies.py`, `lifecycle.py`** contain plain functions that do the S3 work. They
+2. **`buckets.py`, `objects.py`, `policies.py`, `lifecycle.py`, `website.py`** contain plain functions that do the S3 work. They
    don't print anything; they return data or raise exceptions. Each function receives the boto3
    client as its first argument, which makes them easy to test with a fake client.
 3. **`client.py`** is the only place that reads configuration from the environment.
@@ -627,6 +683,53 @@ bucket actions and object actions need different resources: `s3:ListBucketVersio
 on `arn:aws:s3:::BUCKET/*`. With `"Principal": "*"` this means anyone on the internet can delete the
 files, so the command asks for confirmation and is only meant for test buckets.
 
+### Static website hosting
+
+S3 can serve a bucket as a website. Turning it on (`put_bucket_website`) gives the bucket a second
+address, the **website endpoint**:
+
+```text
+http://BUCKET.s3-website-us-east-1.amazonaws.com     older regions use a dash
+http://BUCKET.s3-website.eu-central-1.amazonaws.com  newer regions use a dot
+```
+
+The normal (REST) address `https://BUCKET.s3.amazonaws.com/index.html` only returns single files.
+The website endpoint returns the **index document** (`index.html`) for `/` and for every folder,
+and an optional **error document** for keys that do not exist. It only supports HTTP; for HTTPS
+and a custom domain, CloudFront is put in front of the bucket.
+
+The website endpoint can't send credentials, so the files must be public. `host deploy` therefore
+does the same steps as the lecture, in this order:
+
+1. create the bucket if it is missing (`ensure_bucket`)
+2. turn off Block Public Access (`disable_block_public_access`)
+3. apply the public-read policy for the whole bucket (`create_bucket_policy`); this replaces an
+   existing bucket policy, so don't deploy a website to a bucket with private files
+4. turn on website hosting (`set_bucket_website_policy`)
+5. upload the files (`static_web_page_file`) and print the URL for the bucket's real region
+   (`get_bucket_location`; AWS answers `None` for us-east-1)
+
+The path is checked first, so nothing is changed in AWS if there is no `index.html`.
+
+**Content-Type.** The browser decides what to do with a file by its `Content-Type`. An HTML page
+sent as `binary/octet-stream` is downloaded instead of shown, and a JavaScript module sent as
+`text/plain` is refused, so a React app stays blank. For web files the extension is more reliable
+than python-magic, which only sees "text" in CSS and JS. `website_content_type()` uses the
+extension (`mimetypes` plus a small table for `.js`, `.css`, `.svg`, `.woff2`, ...) and only asks
+python-magic for unknown extensions. Text types get `; charset=utf-8`, so Georgian text displays
+correctly.
+
+**Cache-Control.** HTML files are sent with `no-cache` (the browser checks for a new version every
+time), so a new deploy shows up right away. Other files are cached for a day; Vite puts a hash in
+their names (`index-a1b2c3.js`), so a new build gets new names anyway.
+
+**React.** A React app is plain files after `npm run build`: an `index.html`, and JS / CSS in
+`assets/`. The CLI uploads the `dist/` folder with its subfolders (`collect_site_files` keeps the
+paths, skips hidden files like `.DS_Store`). `vite.config.js` uses `base: "./"`, so the asset paths
+are relative and the app also works under a folder (`host upload --prefix`). With `--spa` the error
+document is `index.html` too, so a path like `/about` loads the app instead of S3's 404 page (S3
+still answers with status 404 then; CloudFront can turn that into 200).
+
 ### Logging and errors
 
 Every module creates its own logger with `logging.getLogger(__name__)`. Logging is configured only
@@ -699,6 +802,13 @@ What is covered:
   output and empty bucket, `-rbt` copying the chosen version and rejecting unknown or latest ids,
   `--unknown` moving files without an extension, and the multiple policy (bucket and object ARNs,
   confirmation before applying)
+- static website hosting: the website configuration with and without an error document, turning it
+  off, reading it (or `None`), the website URL with a dash or a dot by region, the Content-Type
+  per extension (CSS / JS not `text/plain`, charset for text) and from the content for unknown
+  extensions, `no-cache` for HTML, folder uploads keeping subfolders and skipping `.DS_Store`, the
+  `--prefix`, a missing bucket, the order of the `host deploy` steps, creating a missing bucket,
+  no AWS call at all when `index.html` is missing (with the `npm run build` hint for a React
+  project), the bucket region (`None` → us-east-1, `EU` → eu-west-1), and the `host` command output
 
 I also tested all commands manually against a real AWS account.
 
@@ -713,8 +823,28 @@ I also tested all commands manually against a real AWS account.
 - a progress bar for multipart uploads, and uploading the parts in parallel
 - resuming an interrupted multipart upload instead of starting again
 - adding a lifecycle rule without replacing the existing ones
+- `host deploy --delete-removed` to delete files that are not in the new build any more
+- CloudFront in front of the website bucket for HTTPS and a custom domain
 
 ## Troubleshooting
+
+**The website shows `403 Forbidden`.**
+The files are not public. Block Public Access may be on at the account level (S3 console →
+*Block Public Access settings for this account*), which `host deploy` can't change for the bucket
+alone, or the bucket policy was replaced afterwards. `poetry run s3-manager policy get BUCKET` shows
+the current policy.
+
+**The website shows `404 Not Found` with `NoSuchWebsiteConfiguration`.**
+Website hosting is off. Run `host config BUCKET --enable` or `host deploy` again. Also check that
+you use the website URL (`s3-website`) printed by the command, not the normal bucket URL.
+
+**The React page is blank or the CLI says `No index.html ... Run 'npm run build' first`.**
+Upload the build output, not the source: `npm run build` in `static_web_page/react-app/`, then
+deploy `static_web_page/react-app/dist`. If the page is still blank, check the browser's DevTools
+→ Network tab: `.js` files must have `Content-Type: text/javascript`.
+
+**`https://` does not work for the website.**
+The S3 website endpoint is HTTP only. Use `http://`, or put CloudFront in front of it.
 
 **`ImportError: failed to find libmagic. Check your installation`.**
 python-magic is only a wrapper, the actual detection is done by the `libmagic` C library, which

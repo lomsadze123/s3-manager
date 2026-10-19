@@ -1,7 +1,7 @@
 """Command-line interface for s3-manager.
 
 This module only handles user interaction (arguments, prompts, output).
-The actual S3 work is done in buckets.py, objects.py, policies.py and lifecycle.py.
+The actual S3 work is done in buckets.py, objects.py, policies.py, lifecycle.py and website.py.
 """
 
 import json
@@ -16,7 +16,7 @@ import typer
 from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, ParamValidationError
 
-from s3_manager import buckets, lifecycle, objects, policies
+from s3_manager import buckets, lifecycle, objects, policies, website
 from s3_manager.client import init_client
 
 logger = logging.getLogger(__name__)
@@ -32,11 +32,15 @@ policy_app = typer.Typer(help="Generate, apply and read bucket policies.", no_ar
 lifecycle_app = typer.Typer(
     help="Delete objects automatically some days after they were created.", no_args_is_help=True
 )
+host_app = typer.Typer(
+    help="Host a static website (a plain HTML page or a built React app) on S3.", no_args_is_help=True
+)
 
 app.add_typer(bucket_app, name="bucket")
 app.add_typer(object_app, name="object")
 app.add_typer(policy_app, name="policy")
 app.add_typer(lifecycle_app, name="lifecycle")
+app.add_typer(host_app, name="host")
 
 # Friendlier messages for common AWS error codes.
 AWS_ERROR_MESSAGES = {
@@ -58,6 +62,7 @@ AWS_ERROR_MESSAGES = {
     "InvalidLocationConstraint": "Unknown region. Use a region name like eu-central-1.",
     "IllegalLocationConstraintException": "The region does not match the S3 endpoint. Check --region and S3_ENDPOINT_URL.",
     "OperationAborted": "Another request is changing this bucket right now, try again in a moment.",
+    "NoSuchWebsiteConfiguration": "Static website hosting is not enabled on this bucket.",
 }
 
 
@@ -645,3 +650,93 @@ def lifecycle_delete(
         typer.confirm(f"Really delete all lifecycle rules of '{bucket}'?", abort=True)
     lifecycle.delete_lifecycle_policy(init_client(), bucket)
     typer.echo(f"Lifecycle policy of '{bucket}' deleted.")
+
+
+# ---------- host commands ----------
+
+@host_app.command("deploy")
+def host_deploy(
+    bucket: Annotated[str, typer.Argument(help="Bucket for the website. Created if it does not exist.")],
+    path: Annotated[
+        Path,
+        typer.Argument(
+            help="index.html, or a folder with index.html at the top (for React: the dist/ folder).",
+            exists=True,
+        ),
+    ],
+    spa: Annotated[
+        bool,
+        typer.Option("--spa", help="Single page app (React): show index.html for unknown paths too."),
+    ] = False,
+    region: Annotated[
+        Optional[str],
+        typer.Option(help="Region for a new bucket, e.g. eu-central-1. Default: AWS_REGION from .env."),
+    ] = None,
+):
+    """Host a page or a folder as a public website in one step: create the bucket if needed,
+    make it publicly readable (replaces its bucket policy), turn on website hosting, upload."""
+    keys, url = website.host_static_website(init_client(region=region), bucket, path, spa=spa)
+    typer.echo(f"Uploaded {len(keys)} file(s) to '{bucket}'.")
+    typer.echo(f"Website: {url}")
+
+
+@host_app.command("config")
+def host_config(
+    bucket: Annotated[str, typer.Argument(help="Name of the bucket.")],
+    enable: Annotated[bool, typer.Option("--enable", help="Turn static website hosting on.")] = False,
+    disable: Annotated[bool, typer.Option("--disable", help="Turn static website hosting off.")] = False,
+    spa: Annotated[
+        bool, typer.Option("--spa", help="With --enable: show index.html for unknown paths too (React).")
+    ] = False,
+):
+    """Turn static website hosting on with --enable (index.html) or off with --disable.
+    The files and the bucket policy are not changed."""
+    if enable == disable:
+        typer.echo("Use either --enable or --disable.")
+        raise typer.Exit(code=1)
+
+    client = init_client()
+    if not buckets.bucket_exists(client, bucket):
+        typer.echo(f"Bucket '{bucket}' does not exist.")
+        raise typer.Exit(code=1)
+
+    error_document = website.INDEX_DOCUMENT if spa else None
+    website.set_bucket_website_policy(client, bucket, switch=enable, error_document=error_document)
+    if enable:
+        typer.echo(f"Static website hosting turned on for '{bucket}'.")
+        typer.echo(f"Website: {website.website_url(bucket, buckets.get_bucket_region(client, bucket))}")
+    else:
+        typer.echo(f"Static website hosting turned off for '{bucket}'.")
+
+
+@host_app.command("upload")
+def host_upload(
+    bucket: Annotated[str, typer.Argument(help="Bucket of the website.")],
+    path: Annotated[Path, typer.Argument(help="File or folder to upload.", exists=True)],
+    prefix: Annotated[str, typer.Option(help="Upload under this folder, e.g. docs/. Default: bucket root.")] = "",
+):
+    """Upload website files (a file or a folder with subfolders) with the right Content-Type."""
+    client = init_client()
+    keys = website.static_web_page_file(client, bucket, path, prefix=prefix)
+    if not keys:
+        typer.echo(f"No files to upload in '{path}'.")
+        return
+    for key in keys:
+        typer.echo(f"s3://{bucket}/{key}")
+    typer.echo(f"Uploaded {len(keys)} file(s).")
+
+
+@host_app.command("status")
+def host_status(
+    bucket: Annotated[str, typer.Argument(help="Name of the bucket.")],
+):
+    """Show whether static website hosting is on, its index/error page and the website URL."""
+    client = init_client()
+    config = website.read_bucket_website(client, bucket)
+    if config is None:
+        typer.echo(f"Static website hosting is not enabled on '{bucket}'.")
+        return
+    typer.echo(f"Static website hosting is enabled on '{bucket}'.")
+    typer.echo(f"  index page: {config['index']}")
+    typer.echo(f"  error page: {config['error'] or '(S3 default 404 page)'}")
+    typer.echo(f"Website: {website.website_url(bucket, buckets.get_bucket_region(client, bucket))}")

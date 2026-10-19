@@ -483,3 +483,77 @@ def test_object_old_versions_reports_missing_bucket(client):
 
     assert result.exit_code == 1
     assert "Bucket 'missing-bucket' does not exist." in result.output
+
+
+def test_host_deploy_prints_website_url(client, tmp_path):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    page = tmp_path / "index.html"
+    page.write_text("<h1>Beka Lomsadze</h1>")
+
+    result = runner.invoke(cli.app, ["host", "deploy", "my-site", str(page)])
+
+    assert result.exit_code == 0
+    assert "Uploaded 1 file(s) to 'my-site'." in result.output
+    assert "Website: http://my-site.s3-website-us-east-1.amazonaws.com" in result.output
+    client.put_bucket_website.assert_called_once()
+
+
+def test_host_deploy_spa_sets_index_as_error_document(client, tmp_path):
+    client.get_bucket_location.return_value = {"LocationConstraint": "eu-central-1"}
+    (tmp_path / "index.html").write_text("<div id='root'></div>")
+
+    result = runner.invoke(cli.app, ["host", "deploy", "my-site", str(tmp_path), "--spa"])
+
+    assert result.exit_code == 0
+    assert "s3-website.eu-central-1" in result.output
+    configuration = client.put_bucket_website.call_args.kwargs["WebsiteConfiguration"]
+    assert configuration["ErrorDocument"] == {"Key": "index.html"}
+
+
+def test_host_deploy_unbuilt_react_project_fails_before_aws_calls(client, tmp_path):
+    (tmp_path / "package.json").write_text("{}")
+
+    result = runner.invoke(cli.app, ["host", "deploy", "my-site", str(tmp_path)])
+
+    # main() turns the ValueError into a short error message; the runner calls the app directly.
+    assert isinstance(result.exception, ValueError)
+    assert "npm run build" in str(result.exception)
+    client.put_bucket_website.assert_not_called()
+
+
+def test_host_config_needs_exactly_one_flag(client):
+    for flags in ([], ["--enable", "--disable"]):
+        result = runner.invoke(cli.app, ["host", "config", "my-site", *flags])
+
+        assert result.exit_code == 1
+        assert "Use either --enable or --disable." in result.output
+    client.put_bucket_website.assert_not_called()
+
+
+def test_host_config_disable_deletes_website_configuration(client):
+    result = runner.invoke(cli.app, ["host", "config", "my-site", "--disable"])
+
+    assert result.exit_code == 0
+    assert "turned off" in result.output
+    client.delete_bucket_website.assert_called_once_with(Bucket="my-site")
+
+
+def test_host_status_reports_hosting_off(client):
+    client.get_bucket_website.side_effect = make_client_error("NoSuchWebsiteConfiguration")
+
+    result = runner.invoke(cli.app, ["host", "status", "my-site"])
+
+    assert result.exit_code == 0
+    assert "not enabled" in result.output
+
+
+def test_host_status_shows_pages_and_url(client):
+    client.get_bucket_website.return_value = {"IndexDocument": {"Suffix": "index.html"}}
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+
+    result = runner.invoke(cli.app, ["host", "status", "my-site"])
+
+    assert result.exit_code == 0
+    assert "index page: index.html" in result.output
+    assert "(S3 default 404 page)" in result.output
+    assert "http://my-site.s3-website-us-east-1.amazonaws.com" in result.output

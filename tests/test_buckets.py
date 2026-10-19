@@ -5,6 +5,7 @@ from s3_manager.buckets import (
     bucket_exists,
     create_bucket,
     ensure_bucket,
+    get_bucket_region,
     get_bucket_versioning,
     list_buckets,
     read_bucket_encryption,
@@ -116,3 +117,14 @@ def test_read_bucket_encryption_returns_none_without_configuration(client):
     client.get_bucket_encryption.side_effect = make_client_error("ServerSideEncryptionConfigurationNotFoundError")
 
     assert read_bucket_encryption(client, "my-bucket") is None
+
+
+@pytest.mark.parametrize(
+    ("location", "region"),
+    [(None, "us-east-1"), ("EU", "eu-west-1"), ("eu-central-1", "eu-central-1")],
+)
+def test_get_bucket_region_translates_old_location_names(client, location, region):
+    client.get_bucket_location.return_value = {"LocationConstraint": location}
+
+    assert get_bucket_region(client, "my-bucket") == region
+    client.get_bucket_location.assert_called_once_with(Bucket="my-bucket")

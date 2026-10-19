@@ -11,8 +11,11 @@ __pycache__/
 # Test / tool caches
 .pytest_cache/
 
-# Build output
+# Build output (also static_web_page/react-app/dist/)
 dist/
+
+# Node packages of the React demo (recreate with `npm install`)
+node_modules/
 
 # Editor / OS files
 .vscode/
