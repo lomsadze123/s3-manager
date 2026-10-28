@@ -786,3 +786,80 @@ def test_detect_delete_removes_trigger_and_function(client):
     assert "Removed 1 trigger(s)" in result.output
     assert "Lambda function 'object-detection' deleted." in result.output
     client.delete_function.assert_called_once_with(FunctionName="object-detection")
+
+
+# ---------- quote ----------
+
+QUOTE = {
+    "id": "WAn2olKpNv",
+    "content": "It always seems impossible until it's done.",
+    "author": {"name": "Nelson Mandela", "slug": "nelson-mandela"},
+}
+
+
+@pytest.fixture
+def quote_api(monkeypatch):
+    """Replace the quotes API with a list that records the requested authors."""
+    authors = []
+    monkeypatch.setattr(cli.quotes, "get_quote", lambda author=None: authors.append(author) or QUOTE)
+    return authors
+
+
+def test_quote_inspire_shows_random_quote(client, quote_api):
+    result = runner.invoke(cli.app, ["quote", "--inspire"])
+
+    assert result.exit_code == 0
+    assert result.output == "It always seems impossible until it's done.\n---\nNelson Mandela\n"
+    assert quote_api == [None]
+    assert client.mock_calls == []  # no AWS without --save
+
+
+def test_quote_inspire_with_author(quote_api):
+    result = runner.invoke(cli.app, ["quote", "--inspire", "Nelson Mandela"])
+
+    assert result.exit_code == 0
+    assert quote_api == ["Nelson Mandela"]
+
+
+def test_quote_save_puts_json_into_bucket(client, quote_api):
+    result = runner.invoke(cli.app, ["quote", "my-bucket", "--inspire", "Nelson Mandela", "--save"])
+
+    assert result.exit_code == 0
+    assert quote_api == ["Nelson Mandela"]
+    assert "Saved to s3://my-bucket/quotes/nelson-mandela/WAn2olKpNv.json" in result.output
+    client.put_object.assert_called_once()
+
+
+def test_quote_save_random_with_custom_key(client, quote_api):
+    result = runner.invoke(cli.app, ["quote", "my-bucket", "--inspire", "--save", "--key", "daily/today"])
+
+    assert result.exit_code == 0
+    assert quote_api == [None]
+    assert "Saved to s3://my-bucket/daily/today.json" in result.output
+
+
+def test_quote_needs_inspire_flag(quote_api):
+    result = runner.invoke(cli.app, ["quote", "my-bucket"])
+
+    assert result.exit_code == 1
+    assert "Pass --inspire" in result.output
+    assert quote_api == []
+
+
+def test_quote_save_needs_bucket(client, quote_api):
+    result = runner.invoke(cli.app, ["quote", "--inspire", "--save"])
+
+    assert result.exit_code == 1
+    assert "Pass the bucket" in result.output
+    assert quote_api == []
+
+
+def test_quote_save_reports_missing_bucket(client, quote_api):
+    client.head_bucket.side_effect = make_client_error("404")
+
+    result = runner.invoke(cli.app, ["quote", "missing-bucket", "--inspire", "--save"])
+
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
+    assert quote_api == []
+    client.put_object.assert_not_called()

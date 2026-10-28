@@ -64,6 +64,10 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   the result is saved next to the image as JSON (`cat.jpg` → `cat.json`). `detect image` uploads an
   image and prints the detected objects, `detect local` calls the API without AWS, `detect delete`
   removes everything again
+- **Inspirational quotes:** `quote --inspire` prints a random quote from the
+  [Quotable API](https://api.quotable.kurokeita.dev/), `quote --inspire "Nelson Mandela"` a quote by
+  that author, and `quote BUCKET --inspire "Nelson Mandela" --save` also saves the quote as a `.json`
+  object in the bucket (`quotes/nelson-mandela/<id>.json`)
 - **Configuration** through a `.env` file (credentials are never stored in the code)
 - **Logging** of every operation, with a `--verbose` mode for debugging
 - **Readable errors** instead of Python tracebacks (e.g. `ERROR: The bucket does not exist. (NoSuchBucket)`)
@@ -235,7 +239,14 @@ poetry run s3-manager detect image beka-detect-2026 ./photo.jpg   # upload, wait
 poetry run s3-manager object list beka-detect-2026            # photo.jpg and photo.json
 poetry run s3-manager detect delete beka-detect-2026          # trigger + function removed
 
-# 11. clean up (the bucket must be empty before deleting)
+# 11. inspirational quotes (see "Inspirational quotes" below)
+poetry run s3-manager quote --inspire                         # random quote, no AWS needed
+poetry run s3-manager quote --inspire "Nelson Mandela"        # quote by one author
+poetry run s3-manager quote my-unique-bucket-2026 --inspire "Nelson Mandela" --save
+#   -> saved to s3://my-unique-bucket-2026/quotes/nelson-mandela/<id>.json
+poetry run s3-manager quote my-unique-bucket-2026 --inspire --save --key quotes/today.json
+
+# 12. clean up (the bucket must be empty before deleting)
 poetry run s3-manager bucket delete my-unique-bucket-2026
 ```
 
@@ -384,6 +395,7 @@ command: `s3-manager -v bucket list`.
 | `detect image BUCKET FILE [--key K] [--timeout 60] [--min-confidence 0.5]` | Upload an image (type checked with python-magic), wait for the `.json` result the function writes, and print each object with its confidence and box |
 | `detect local FILE [--provider ...] [--min-confidence 0.5]` | Send an image straight to the API, without AWS (to test the key) |
 | `detect delete BUCKET [--function-name ...] [-y]` | Remove the image triggers from the bucket and delete the function. Images and results stay. |
+| `quote [BUCKET] --inspire [AUTHOR] [--save] [--key KEY]` | `--inspire`: print a random quote; `--inspire "AUTHOR"`: a random quote by that author (full name or slug, exit code `1` if the API has none). `--save`: also save the quote as JSON in BUCKET, under `quotes/<author-slug>/<id>.json` or `--key` (`.json` is added if missing). BUCKET goes before `--inspire`. Without `--inspire`: show a hint (exit code `1`). |
 
 Every command has its own help, e.g. `poetry run s3-manager object upload --help`.
 
@@ -521,6 +533,15 @@ JSON next to the image). The function is in `aws_lambda/object_detection.py`; th
 | `query_detection_api()` | `detection.py` | `detect local` |
 | `remove_object_detection()` | `detection.py` | `detect delete` |
 
+Added for the lecture 5 "inspire" script (`main.py` with `get_quote()` and `print_quote()`, turned
+into the `quote` command with `--inspire` and `--save`):
+
+| Function | Module | Used by |
+|---|---|---|
+| `get_quote(author=None)` | `quotes.py` | `quote --inspire [AUTHOR]` |
+| `format_quote()` (the lecture's `print_quote()`, returns the text so the CLI prints it) | `quotes.py` | `quote --inspire` |
+| `quote_key()`, `save_quote()` | `quotes.py` | `quote BUCKET --inspire --save` |
+
 The script's `-u_t put_object` and `-u_t multipart_upload` were already here as `--method small`
 and `--method large`, and `-l_v` as `object file -ver`.
 
@@ -553,6 +574,10 @@ Differences from the lecture code:
   result (here `{"error", "status"}` and a log line); the JSON is uploaded without a Content-Type;
   and the code contains a placeholder Hugging Face token as default (here an empty default and a
   clear error).
+- Lecture 5 inspire bugs that are fixed here: every error is caught and printed, then `{}` is
+  returned, so `print_quote()` crashes with `KeyError` (here the error goes up and is shown as one
+  line); the API answers an unknown author with `{}` and status 200, which also ends in that
+  `KeyError` (here "No quotes found for author ..."); and `urlopen` has no timeout (here 10 seconds).
 - The lecture fixes the permissions issue with `delete_public_access_block()`. This tool uses
   `put_public_access_block()` with all four settings set to `False`, which has the same effect but
   keeps an explicit configuration on the bucket. It is a separate step (`policy set-public`,
@@ -579,8 +604,9 @@ s3-manager/
 │   ├── website.py     # set_bucket_website_policy, read_bucket_website, static_web_page_file,
 │   │                  # website_content_type, cache_control, website_url, find_error_document,
 │   │                  # host_static_website, delete_website
-│   └── detection.py   # build_lambda_zip, deploy_detection_lambda, allow_s3_invoke,
-│                      # set_detection_trigger, wait_for_result, normalize_detections, ...
+│   ├── detection.py   # build_lambda_zip, deploy_detection_lambda, allow_s3_invoke,
+│   │                  # set_detection_trigger, wait_for_result, normalize_detections, ...
+│   └── quotes.py      # get_quote, format_quote, quote_key, save_quote
 ├── aws_lambda/
 │   └── object_detection.py  # the Lambda function: lambda_handler, query_image, query_api_ninjas,
 │                            # query_huggingface (deployed on its own, so no s3_manager imports)
@@ -924,6 +950,34 @@ exists, and prints the objects above `--min-confidence`. If no result appears wi
 the function's logs are in CloudWatch (Lambda console → the function → *Monitor* → *View
 CloudWatch logs*).
 
+### Inspirational quotes
+
+`quotes.py` calls `https://api.quotable.kurokeita.dev/api/quotes/random` with `requests` (with the
+same browser user-agent as the lecture script and a 10 second timeout). With an author it adds
+`?author=...`, which accepts the full name (`Nelson Mandela`) or the slug (`nelson-mandela`). The
+answer looks like this:
+
+```json
+{"quote": {"id": "WAn2olKpNv", "content": "...", "tags": [...],
+           "author": {"name": "Nelson Mandela", "slug": "nelson-mandela", "bio": "...", ...}}}
+```
+
+The command prints it like the lecture script (text, `---`, author). For an author the API doesn't
+know, it still answers `200 OK`, but with `{}`, so `get_quote()` raises "No quotes found for author".
+The assignment's example author **Linus Torvalds is not in the API's database** (checked on
+2026-10-28: `{}` for the name, `422 Author with slug linus-torvalds not found` for the slug), so
+`quote --inspire "Linus Torvalds"` prints that error; any author from the API works.
+
+`--inspire` is an option with an optional value: alone it means "any author", with a value it is
+the author. Typer options always need a value (Click's `is_flag=False, flag_value=""` trick is
+ignored by Typer 0.27), so `OptionalInspireCommand.parse_args` in `cli.py` gives a bare
+`--inspire` (last word, or followed by another option like `--save`) an empty value before Typer
+parses the arguments, like the `host BUCKET` shortcut does. That's why BUCKET must come before it, otherwise
+`--inspire my-bucket` would read the bucket name as the author. `--save` checks the bucket first,
+then saves the whole `quote` object (text, author, tags) with `put_object` as pretty-printed JSON
+with `Content-Type: application/json`. Without `--save` no AWS call is made, so plain `--inspire`
+works without credentials.
+
 ### Logging and errors
 
 Every module creates its own logger with `logging.getLogger(__name__)`. Logging is configured only
@@ -937,7 +991,7 @@ with exit code `1`:
   friendlier message.
 - `NoCredentialsError`, `ParamValidationError` and other `BotoCoreError`s: problems before a
   response arrives (missing credentials, invalid input, network).
-- `requests` errors: a download failed.
+- `requests` errors: a download or an API call (quotes) failed.
 - `ValueError`: invalid input such as an unknown ACL.
 
 Unexpected errors are not caught, so real bugs still show a full traceback.
@@ -1022,6 +1076,13 @@ What is covered:
   added before the trigger, polling and timeout for the result (fake clock), an old result deleted
   before uploading, `.gif` rejected, both API answer formats, and the `detect` command output
   (missing key in `.env`, region of the bucket, role from `.env`)
+- quotes (`requests.get` patched): no `author` parameter for a random quote, the author sent as
+  `params`, `{}` from the API turned into "No quotes found for author 'Linus Torvalds'", the
+  lecture's output format, the default key `quotes/<slug>/<id>.json`, the JSON body and
+  Content-Type sent with `put_object`, and `.json` added to a custom key
+- `quote` command: `--inspire` with and without an author (no AWS call without `--save`),
+  `--save` with the default and a custom key, and requiring `--inspire`, a bucket for `--save`
+  and an existing bucket (checked before calling the API)
 
 I also tested all commands manually against a real AWS account.
 

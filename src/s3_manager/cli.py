@@ -1,8 +1,8 @@
 """Command-line interface for s3-manager.
 
 This module only handles user interaction (arguments, prompts, output).
-The actual AWS work is done in buckets.py, objects.py, policies.py, lifecycle.py, website.py
-and detection.py.
+The actual AWS work is done in buckets.py, objects.py, policies.py, lifecycle.py, website.py,
+detection.py and quotes.py.
 """
 
 import json
@@ -16,9 +16,9 @@ import requests
 import typer
 from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, ParamValidationError
-from typer.core import TyperGroup
+from typer.core import TyperCommand, TyperGroup
 
-from s3_manager import buckets, detection, lifecycle, objects, policies, website
+from s3_manager import buckets, detection, lifecycle, objects, policies, quotes, website
 from s3_manager.client import init_client, read_setting
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,23 @@ class DefaultDeployGroup(TyperGroup):
         if args and not args[0].startswith("-") and args[0] not in self.commands:
             args = ["deploy", *args]
         return super().parse_args(ctx, args)
+
+
+class OptionalInspireCommand(TyperCommand):
+    """The quote command: a bare '--inspire' means "any author".
+
+    Typer options always need a value, so '--inspire' as the last word or before another option
+    gets an empty one: 'quote BUCKET --inspire --save' runs 'quote BUCKET --inspire "" --save'.
+    """
+
+    def parse_args(self, ctx, args):
+        fixed = []
+        for index, arg in enumerate(args):
+            fixed.append(arg)
+            next_arg = args[index + 1] if index + 1 < len(args) else None
+            if arg == "--inspire" and (next_arg is None or next_arg.startswith("-")):
+                fixed.append("")
+        return super().parse_args(ctx, fixed)
 
 
 app = typer.Typer(
@@ -127,9 +144,9 @@ def main():
     except (BotoCoreError, S3UploadFailedError) as error:
         fail(str(error))
     except requests.HTTPError as error:
-        fail(f"Download failed: {error}")
+        fail(f"Request failed: {error}")
     except requests.RequestException as error:
-        fail(f"Download failed: could not reach the URL ({type(error).__name__}).")
+        fail(f"Request failed: could not reach the URL ({type(error).__name__}).")
     except (ValueError, TimeoutError) as error:
         fail(str(error))
 
@@ -955,3 +972,48 @@ def detect_delete(
         typer.echo(f"Lambda function '{function_name}' deleted.")
     else:
         typer.echo(f"Lambda function '{function_name}' does not exist.")
+
+
+# ---------- quote command ----------
+
+@app.command("quote", cls=OptionalInspireCommand)
+def quote_cmd(
+    bucket: Annotated[
+        Optional[str], typer.Argument(help="Bucket to save the quote in (only needed with --save).")
+    ] = None,
+    inspire: Annotated[
+        Optional[str],
+        typer.Option(
+            "--inspire",
+            metavar="[AUTHOR]",
+            help='Show a random quote, or a random quote by AUTHOR: --inspire "Nelson Mandela".',
+        ),
+    ] = None,
+    save: Annotated[bool, typer.Option("--save", help="Also save the quote as .json in BUCKET.")] = False,
+    key: Annotated[
+        Optional[str], typer.Option(help=f"Object key for --save. Default: {quotes.QUOTES_FOLDER}/<author>/<id>.json")
+    ] = None,
+):
+    """Show an inspirational quote with --inspire, and save it to a bucket with --save.
+    Put BUCKET before --inspire: 'quote my-bucket --inspire "Nelson Mandela" --save'."""
+    if inspire is None:
+        typer.echo('Pass --inspire for a random quote, or --inspire "AUTHOR" for a quote by that author.')
+        raise typer.Exit(code=1)
+    if save and not bucket:
+        typer.echo('Pass the bucket before --inspire to save the quote: quote BUCKET --inspire --save')
+        raise typer.Exit(code=1)
+
+    client = None
+    if save:
+        # Check the bucket first, so a wrong name fails before the API call.
+        client = init_client()
+        if not buckets.bucket_exists(client, bucket):
+            typer.echo(f"Bucket '{bucket}' does not exist.")
+            raise typer.Exit(code=1)
+
+    quote = quotes.get_quote(inspire or None)
+    typer.echo(quotes.format_quote(quote))
+
+    if save:
+        saved_key = quotes.save_quote(client, bucket, quote, key=key)
+        typer.echo(f"Saved to s3://{bucket}/{saved_key}")
