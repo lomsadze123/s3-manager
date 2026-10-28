@@ -9,6 +9,8 @@ from s3_manager.website import (
     cache_control,
     check_site_folder,
     collect_site_files,
+    delete_website,
+    find_error_document,
     host_static_website,
     read_bucket_website,
     set_bucket_website_policy,
@@ -237,3 +239,76 @@ def test_host_static_website_makes_whole_bucket_public(client, tmp_path):
         },
     )
     assert '"Resource": "arn:aws:s3:::my-site/*"' in client.put_bucket_policy.call_args.kwargs["Policy"]
+
+
+def test_find_error_document_in_folder_and_next_to_file(tmp_path):
+    (tmp_path / "index.html").write_text("<h1>Hi</h1>")
+    (tmp_path / "error.html").write_text("<h1>404</h1>")
+
+    assert find_error_document(tmp_path, "error.html") == tmp_path / "error.html"
+    assert find_error_document(tmp_path / "index.html", "error.html") == tmp_path / "error.html"
+
+
+def test_find_error_document_rejects_missing_page(tmp_path):
+    with pytest.raises(ValueError, match="'404.html' not found"):
+        find_error_document(tmp_path, "404.html")
+
+
+def test_host_static_website_uploads_error_page_next_to_single_file(client, tmp_path):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    (tmp_path / "index.html").write_text("<h1>Hi</h1>")
+    (tmp_path / "error.html").write_text("<h1>404</h1>")
+
+    keys, _ = host_static_website(client, "my-site", tmp_path / "index.html", error_document="error.html")
+
+    assert keys == ["index.html", "error.html"]
+    configuration = client.put_bucket_website.call_args.kwargs["WebsiteConfiguration"]
+    assert configuration["ErrorDocument"] == {"Key": "error.html"}
+
+
+def test_host_static_website_error_page_in_subfolder_keeps_its_key(client, tmp_path):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    (tmp_path / "index.html").write_text("<h1>Hi</h1>")
+    (tmp_path / "pages").mkdir()
+    (tmp_path / "pages" / "404.html").write_text("<h1>404</h1>")
+
+    keys, _ = host_static_website(client, "my-site", tmp_path / "index.html", error_document="pages/404.html")
+
+    assert keys == ["index.html", "pages/404.html"]
+
+
+def test_host_static_website_checks_error_page_before_any_aws_call(client, tmp_path):
+    (tmp_path / "index.html").write_text("<h1>Hi</h1>")
+
+    with pytest.raises(ValueError, match="not found"):
+        host_static_website(client, "my-site", tmp_path, error_document="error.html")
+    with pytest.raises(ValueError, match="either --spa or --error-document"):
+        host_static_website(client, "my-site", tmp_path, spa=True, error_document="error.html")
+    assert client.mock_calls == []
+
+
+def test_delete_website_only_turns_hosting_off(client):
+    assert delete_website(client, "my-site") == 0
+
+    client.delete_bucket_website.assert_called_once_with(Bucket="my-site")
+    client.delete_object.assert_not_called()
+
+
+def test_delete_website_purge_deletes_every_object(client):
+    client.get_paginator.return_value.paginate.return_value = [
+        {"Contents": [{"Key": "index.html", "Size": 1, "LastModified": None}]},
+        {"Contents": [{"Key": "assets/app.js", "Size": 1, "LastModified": None}]},
+    ]
+
+    assert delete_website(client, "my-site", purge=True) == 2
+
+    client.delete_object.assert_any_call(Bucket="my-site", Key="index.html")
+    client.delete_object.assert_any_call(Bucket="my-site", Key="assets/app.js")
+
+
+def test_delete_website_rejects_missing_bucket(client):
+    client.head_bucket.side_effect = make_client_error("404")
+
+    with pytest.raises(ValueError, match="does not exist"):
+        delete_website(client, "missing")
+    client.delete_bucket_website.assert_not_called()

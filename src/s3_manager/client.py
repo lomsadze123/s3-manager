@@ -1,4 +1,4 @@
-"""Creating the boto3 S3 client.
+"""Creating boto3 clients (S3, and Lambda / STS for the object detection function).
 
 This is the only module that reads configuration from the environment.
 """
@@ -14,12 +14,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_REGION = "us-east-1"
 
 
-def init_client(region=None):
-    """Create a boto3 S3 client using settings from the environment / .env file.
+def init_client(region=None, service="s3"):
+    """Create a boto3 client (S3 by default) using settings from the environment / .env file.
 
     region overrides AWS_REGION, e.g. to create a bucket in another region. A create_bucket
     request should be sent to the endpoint of the bucket's region, otherwise S3 can answer with
     IllegalLocationConstraintException, so the client is created for that region.
+    service is another AWS service, e.g. "lambda" or "sts"; S3_ENDPOINT_URL is only used for S3.
 
     Environment variables:
         AWS_ACCESS_KEY_ID      - access key (required unless using an AWS profile)
@@ -31,15 +32,26 @@ def init_client(region=None):
     load_dotenv(find_dotenv(usecwd=True))
 
     region = region or os.getenv("AWS_REGION") or DEFAULT_REGION
-    endpoint_url = os.getenv("S3_ENDPOINT_URL") or None
+    endpoint_url = (os.getenv("S3_ENDPOINT_URL") or None) if service == "s3" else None
 
-    logger.debug("Creating S3 client (region=%s, endpoint=%s)", region, endpoint_url or "AWS default")
+    logger.debug(
+        "Creating %s client (region=%s, endpoint=%s)", service, region, endpoint_url or "AWS default"
+    )
 
     return boto3.client(
-        "s3",
+        service,
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         aws_session_token=os.getenv("AWS_SESSION_TOKEN") or None,
         region_name=region,
         endpoint_url=endpoint_url,
     )
+
+
+def read_setting(name):
+    """Return a setting from the environment / .env file, or None if it is not set or empty.
+
+    Used for the object detection settings: API_NINJAS_KEY, HF_API_TOKEN, LAMBDA_ROLE_ARN.
+    """
+    load_dotenv(find_dotenv(usecwd=True))
+    return os.getenv(name) or None

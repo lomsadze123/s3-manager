@@ -51,7 +51,15 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
 - **Static website hosting:** `host deploy BUCKET PATH` turns a bucket into a public website in one
   step (create the bucket if needed, public-read policy, website hosting, upload) and prints the URL.
   It works for a single `index.html` and for a built React app (`--spa`). Every file gets the right
-  `Content-Type` and `Cache-Control`. `host config`, `host upload` and `host status` do the single steps
+  `Content-Type` and `Cache-Control`. `host config`, `host upload` and `host status` do the single steps.
+  My own extra arguments: `--error-document error.html` (custom 404 page), `--open` (open the site in
+  the browser) and `host delete [--purge]` (take the site down, optionally deleting its files)
+- **Object detection with AWS Lambda:** `detect deploy BUCKET` creates a Lambda function and connects
+  it to the bucket, so every new `.jpg` / `.jpeg` / `.png` is sent to the free
+  [API Ninjas Object Detection](https://api-ninjas.com/api/objectdetection) API (or Hugging Face) and
+  the result is saved next to the image as JSON (`cat.jpg` → `cat.json`). `detect image` uploads an
+  image and prints the detected objects, `detect local` calls the API without AWS, `detect delete`
+  removes everything again
 - **Configuration** through a `.env` file (credentials are never stored in the code)
 - **Logging** of every operation, with a `--verbose` mode for debugging
 - **Readable errors** instead of Python tracebacks (e.g. `ERROR: The bucket does not exist. (NoSuchBucket)`)
@@ -69,6 +77,8 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
 | [requests](https://requests.readthedocs.io/) | downloads files from URLs |
 | [python-magic](https://github.com/ahupp/python-magic) | detects the real file type of downloads and `--by-type` uploads (wrapper around the `libmagic` C library) |
 | `logging` (standard library) | operation logs |
+| [AWS Lambda](https://docs.aws.amazon.com/lambda/) + [urllib3](https://urllib3.readthedocs.io/) | the object detection function (`aws_lambda/object_detection.py`); urllib3 is already in the Lambda runtime, so no layer is needed |
+| [API Ninjas Object Detection](https://api-ninjas.com/api/objectdetection) | free object detection API (no bank card); Hugging Face `facebook/detr-resnet-50` as an option |
 | [pytest](https://docs.pytest.org/) | unit tests |
 | [Node.js](https://nodejs.org/) + [Vite](https://vite.dev/) + [React](https://react.dev/) | only for building the React demo site in `static_web_page/react-app/` |
 
@@ -111,6 +121,9 @@ cp .env.example .env
 | `AWS_SESSION_TOKEN` | no | Only for temporary credentials (e.g. AWS Academy / Learner Lab). Leave empty for IAM user keys. |
 | `AWS_REGION` | no | Region for new buckets, e.g. `eu-central-1` (default: `us-east-1`) |
 | `S3_ENDPOINT_URL` | no | Endpoint of an S3-compatible service, e.g. `http://localhost:9000` for MinIO. Leave empty for AWS. |
+| `API_NINJAS_KEY` | for `detect` | Key from [api-ninjas.com](https://api-ninjas.com) (free, no bank card). `detect deploy` copies it into the Lambda function's environment variables. |
+| `HF_API_TOKEN` | no | Hugging Face token, only for `detect ... --provider huggingface` |
+| `LAMBDA_ROLE_ARN` | no | IAM role of the Lambda function. Empty: the account's `LabRole` (AWS Academy), or pass `--role-arn` |
 
 \* If the keys are not set, boto3 falls back to its normal credential lookup (for example
 `~/.aws/credentials` created by `aws configure`).
@@ -200,8 +213,22 @@ cd static_web_page/react-app && npm install && npm run build && cd ../..       #
 poetry run s3-manager host deploy beka-react-2026 static_web_page/react-app/dist --spa
 poetry run s3-manager host status beka-react-2026
 poetry run s3-manager host config beka-react-2026 --disable                    # website off again
+# my own arguments: custom 404 page, open the browser, take the site down
+poetry run s3-manager host deploy beka-site-2026 static_web_page/index.html --error-document error.html --open
+#   -> http://beka-site-2026.s3-website-us-east-1.amazonaws.com/missing shows static_web_page/error.html
+poetry run s3-manager host status beka-site-2026 --open
+poetry run s3-manager host delete beka-site-2026            # hosting off, files stay
+poetry run s3-manager host delete beka-site-2026 --purge    # hosting off and every file deleted
 
-# 10. clean up (the bucket must be empty before deleting)
+# 10. object detection with Lambda (see "Object detection with AWS Lambda" below)
+poetry run s3-manager detect local ./photo.jpg                # test the API key, no AWS
+poetry run s3-manager bucket create beka-detect-2026
+poetry run s3-manager detect deploy beka-detect-2026          # function + permission + trigger
+poetry run s3-manager detect image beka-detect-2026 ./photo.jpg   # upload, wait for photo.json, print it
+poetry run s3-manager object list beka-detect-2026            # photo.jpg and photo.json
+poetry run s3-manager detect delete beka-detect-2026          # trigger + function removed
+
+# 11. clean up (the bucket must be empty before deleting)
 poetry run s3-manager bucket delete my-unique-bucket-2026
 ```
 
@@ -322,10 +349,15 @@ command: `s3-manager -v bucket list`.
 | `lifecycle set BUCKET [--days 120] [--prefix P]` | Delete objects `--days` days after creation (whole bucket, or only under `--prefix`). Replaces existing lifecycle rules. |
 | `lifecycle get BUCKET` | Show the current lifecycle rules |
 | `lifecycle delete BUCKET [-y]` | Remove all lifecycle rules (asks for confirmation unless `-y`) |
-| `host deploy BUCKET PATH [--spa] [--region R]` | Host a website in one step: create the bucket if it does not exist, turn off Block Public Access, apply a public-read policy for the whole bucket (**replaces** an existing bucket policy), turn on website hosting, upload, print the URL. PATH is an `index.html` or a folder with `index.html` at the top (a React app: its `dist/` folder). `--spa` also shows `index.html` for unknown paths. |
-| `host config BUCKET (--enable\|--disable) [--spa]` | Only turn website hosting on (index document `index.html`) or off. Files and policy are not changed. |
+| `host deploy BUCKET PATH [--spa \| --error-document KEY] [--region R] [--open]` | Host a website in one step: create the bucket if it does not exist, turn off Block Public Access, apply a public-read policy for the whole bucket (**replaces** an existing bucket policy), turn on website hosting, upload, print the URL. PATH is an `index.html` or a folder with `index.html` at the top (a React app: its `dist/` folder). `--spa` also shows `index.html` for unknown paths. `--error-document error.html` shows that page instead (it must be in the folder, or next to the deployed file, which then uploads it too). `--open` opens the website in the browser. |
+| `host config BUCKET (--enable\|--disable) [--spa \| --error-document KEY] [--open]` | Only turn website hosting on (index document `index.html`) or off. Files and policy are not changed. With `--error-document` it warns if that key is not in the bucket yet. |
 | `host upload BUCKET PATH [--prefix P]` | Only upload a website file or folder (subfolders kept) with the right Content-Type and Cache-Control |
-| `host status BUCKET` | Show whether website hosting is on, its index and error page, and the website URL |
+| `host status BUCKET [--open]` | Show whether website hosting is on, its index and error page, and the website URL |
+| `host delete BUCKET [--purge] [-y]` | Take a website down: turn website hosting off. With `--purge` also delete every object in the bucket. The bucket and its policy stay. Asks for confirmation unless `-y`. |
+| `detect deploy BUCKET [--provider api-ninjas\|huggingface] [--function-name object-detection] [--role-arn ARN]` | Create (or update) the object detection Lambda function in the bucket's region with the API key from `.env`, allow S3 to call it, and call it for every new `.jpg` / `.jpeg` / `.png` in the bucket. |
+| `detect image BUCKET FILE [--key K] [--timeout 60] [--min-confidence 0.5]` | Upload an image (type checked with python-magic), wait for the `.json` result the function writes, and print each object with its confidence and box |
+| `detect local FILE [--provider ...] [--min-confidence 0.5]` | Send an image straight to the API, without AWS (to test the key) |
+| `detect delete BUCKET [--function-name ...] [-y]` | Remove the image triggers from the bucket and delete the function. Images and results stay. |
 
 Every command has its own help, e.g. `poetry run s3-manager object upload --help`.
 
@@ -416,6 +448,39 @@ Added for the static website assignment, based on the lecture 5 catch-up script
 
 The lecture's `bucket --assign_read_policy` step is `create_bucket_policy()`, which already existed.
 
+The lecture 5 script also comes in a version with CLI arguments (`s3staticwebpagewithargs`), which
+adds a `host` subcommand to its argparse CLI. Every argument of it already has a Typer equivalent:
+
+| Lecture 5 argument | What it does | s3-manager |
+|---|---|---|
+| `host BUCKET_NAME` | bucket of the website (required) | `host ... BUCKET` |
+| `-wc True` / `--website_configuration True` | `put_bucket_website` with `index.html` | `host config BUCKET --enable` |
+| `-wc False` | `delete_bucket_website` | `host config BUCKET --disable` |
+| `-hs NAME` / `--host_static NAME` | upload `static_web_page/NAME` (a file or a folder) | `host upload BUCKET PATH` (any path) |
+
+My own arguments, added for the "experiment by adding your own custom arguments" task:
+
+| Argument | Function | What it does |
+|---|---|---|
+| `host deploy/config --error-document error.html` | `find_error_document()`, `set_bucket_website_policy(error_document=)` | custom 404 page; the lecture has `ErrorDocument` commented out |
+| `host deploy/config/status --open` | `typer.launch()` | opens the website in the browser |
+| `host delete [--purge]` | `delete_website()` | turns hosting off, with `--purge` deletes every object |
+
+Added for the lecture 5 Lambda example (`lambda_1.py`: S3 trigger → object detection API →
+JSON next to the image). The function is in `aws_lambda/object_detection.py`; the CLI deploys it:
+
+| Function | Module | Used by |
+|---|---|---|
+| `lambda_handler()` | `aws_lambda/object_detection.py` | Lambda, for every new image in the bucket |
+| `query_image()` | `aws_lambda/object_detection.py` | picks the provider from `PROVIDER` |
+| `query_api_ninjas()` | `aws_lambda/object_detection.py` | default provider (`API_NINJAS_KEY`) |
+| `query_huggingface()` | `aws_lambda/object_detection.py` | `PROVIDER=huggingface` (`HF_API_TOKEN`) |
+| `build_lambda_zip()`, `deploy_detection_lambda()` | `detection.py` | `detect deploy` (create or update the function) |
+| `allow_s3_invoke()`, `set_detection_trigger()` | `detection.py` | `detect deploy` (the S3 trigger the lecture sets up in the console) |
+| `wait_for_result()`, `normalize_detections()` | `detection.py` | `detect image` |
+| `query_detection_api()` | `detection.py` | `detect local` |
+| `remove_object_detection()` | `detection.py` | `detect delete` |
+
 The script's `-u_t put_object` and `-u_t multipart_upload` were already here as `--method small`
 and `--method large`, and `-l_v` as `object file -ver`.
 
@@ -440,6 +505,14 @@ Differences from the lecture code:
   `s3-website-REGION`, which is wrong for newer regions like `eu-central-1`
   (`s3-website.eu-central-1`); the region comes from an env variable instead of the bucket; and there
   is no error document, so a React app can't handle unknown paths.
+- Lecture 5 Lambda bugs that are fixed here: the object key from the S3 event is used as it is, but
+  S3 URL-encodes it (`my photo.jpg` arrives as `my+photo.jpg`), so `download_fileobj` fails for
+  names with spaces (here `unquote_plus`); every file that is not `.json` is sent to the API, also
+  `.txt` or `.pdf` (here only images, and the trigger itself only fires for images, so the `.json`
+  result can't call the function again); an API error (wrong key, 401) is saved as if it were a
+  result (here `{"error", "status"}` and a log line); the JSON is uploaded without a Content-Type;
+  and the code contains a placeholder Hugging Face token as default (here an empty default and a
+  clear error).
 - The lecture fixes the permissions issue with `delete_public_access_block()`. This tool uses
   `put_public_access_block()` with all four settings set to `False`, which has the same effect but
   keeps an explicit configuration on the bucket. It is a separate step (`policy set-public`,
@@ -463,10 +536,17 @@ s3-manager/
 │   ├── policies.py    # generate_public_read_policy, generate_multiple_policy, create_bucket_policy,
 │   │                  # read_bucket_policy
 │   ├── lifecycle.py   # set_lifecycle_policy, read_lifecycle_policy, delete_lifecycle_policy
-│   └── website.py     # set_bucket_website_policy, read_bucket_website, static_web_page_file,
-│                      # website_content_type, cache_control, website_url, host_static_website
+│   ├── website.py     # set_bucket_website_policy, read_bucket_website, static_web_page_file,
+│   │                  # website_content_type, cache_control, website_url, find_error_document,
+│   │                  # host_static_website, delete_website
+│   └── detection.py   # build_lambda_zip, deploy_detection_lambda, allow_s3_invoke,
+│                      # set_detection_trigger, wait_for_result, normalize_detections, ...
+├── aws_lambda/
+│   └── object_detection.py  # the Lambda function: lambda_handler, query_image, query_api_ninjas,
+│                            # query_huggingface (deployed on its own, so no s3_manager imports)
 ├── static_web_page/
 │   ├── index.html     # the simple site: a page with my first and last name
+│   ├── error.html     # custom 404 page for --error-document
 │   └── react-app/     # the React demo (Vite): npm install && npm run build -> dist/
 ├── tests/             # pytest unit tests for each module and the CLI (no AWS account needed)
 ├── .env.example       # template for the .env file
@@ -730,6 +810,68 @@ are relative and the app also works under a folder (`host upload --prefix`). Wit
 document is `index.html` too, so a path like `/about` loads the app instead of S3's 404 page (S3
 still answers with status 404 then; CloudFront can turn that into 200).
 
+**My own arguments.** `--error-document error.html` sets S3's `ErrorDocument`, so a missing page
+shows my own 404 page instead of S3's XML error. When a single `index.html` is deployed, the error
+page next to it is uploaded too (an error page in a subfolder, like `pages/404.html`, keeps that key).
+The file is checked before anything is changed in AWS. `--spa` and `--error-document` can't be used
+together, because both set the same `ErrorDocument`. `--open` uses `typer.launch()`, which opens the
+URL with the system's default browser. `host delete` is the opposite of `host deploy`: it calls
+`delete_bucket_website`, and with `--purge` deletes every object. It does not remove the public-read
+policy or the bucket, so without `--purge` the files are still public through the normal S3 URL.
+
+### Object detection with AWS Lambda
+
+```text
+detect image ──upload cat.jpg──> S3 bucket ──"ObjectCreated" event──> Lambda: object_detection.py
+                                    ^                                        │ download cat.jpg
+                                    │                                        │ POST to API Ninjas
+detect image <──reads cat.json──────┴──────────── put_object cat.json <──────┘
+```
+
+**The function** (`aws_lambda/object_detection.py`) is the lecture's `lambda_1.py` with the bugs
+above fixed. It receives an S3 event with one record per new object, downloads the image into
+memory (`io.BytesIO`), sends it to the API and saves the answer as `<name>.json` in the same bucket.
+It only uses the standard library, boto3 and urllib3, which the Lambda Python runtime already has,
+so the deployment package is one file and no layer is needed. The S3 client and the HTTP pool are
+created outside the handler, so Lambda reuses them while the container is warm.
+
+**Providers.** `PROVIDER=api-ninjas` (default) sends the image as a form upload with the
+`X-Api-Key` header. Hugging Face needs a bank card now even for the free tier, so it's only an
+option (`--provider huggingface`, `HF_API_TOKEN`). Both answers are turned into one format by
+`normalize_detections()`: API Ninjas sends the confidence as a string and the box as `x1..y2`,
+Hugging Face sends `score` and `xmin..ymax`.
+
+**`detect deploy`** does in code what the lecture does in the console:
+
+1. zip the handler file (`build_lambda_zip`, in memory, the file at the top of the zip)
+2. create the function (`create_function`, runtime `python3.13`, handler
+   `object_detection.lambda_handler`, timeout 30 s), or update its code and settings if it exists.
+   It waits with the `function_active_v2` / `function_updated_v2` waiters, because Lambda refuses
+   changes while the previous one is still running.
+   The function is created in the **bucket's region**, because S3 can only call functions there.
+3. the role: AWS Academy accounts can't create IAM roles, but each has `LabRole`, so its ARN is
+   built from the account id (`sts.get_caller_identity`). Use `--role-arn` or `LAMBDA_ROLE_ARN`
+   for another role (it needs S3 read/write and CloudWatch Logs permissions).
+4. `add_permission`: allow `s3.amazonaws.com` to invoke the function, only for this bucket
+   (`SourceArn`) and this account (`SourceAccount`). This must come before the trigger, because S3
+   tests the permission when the trigger is saved.
+5. the trigger (`put_bucket_notification_configuration`): one `s3:ObjectCreated:*` rule per
+   extension (`.jpg`, `.jpeg`, `.png` and upper case, because a filter allows one suffix and is
+   case-sensitive). The function writes `.json` into the same bucket, and a trigger on every
+   object would call it again for its own result, forever. The suffix filter prevents that.
+   This call replaces all notifications of a bucket, so the existing ones are read first and kept.
+
+The API key is copied from `.env` into the function's environment variables. Anyone who can open the
+function in the Lambda console can see it, which is fine for a free key in a lab account; for real
+projects it would go into Secrets Manager.
+
+**`detect image`** deletes an old `cat.json` first (otherwise the old result would be read at
+once), uploads the image with `put_object` (type checked with python-magic, so a renamed file is
+rejected before it reaches Lambda), then polls `head_object` every 2 seconds until `cat.json`
+exists, and prints the objects above `--min-confidence`. If no result appears within `--timeout`,
+the function's logs are in CloudWatch (Lambda console → the function → *Monitor* → *View
+CloudWatch logs*).
+
 ### Logging and errors
 
 Every module creates its own logger with `logging.getLogger(__name__)`. Logging is configured only
@@ -809,6 +951,21 @@ What is covered:
   `--prefix`, a missing bucket, the order of the `host deploy` steps, creating a missing bucket,
   no AWS call at all when `index.html` is missing (with the `npm run build` hint for a React
   project), the bucket region (`None` → us-east-1, `EU` → eu-west-1), and the `host` command output
+- my own host arguments: the error page found in the folder or next to the file, missing error page
+  and `--spa` with `--error-document` rejected before any AWS call, the error page uploaded with its
+  key (also in a subfolder), `--open` calling `typer.launch` with the URL (patched), the warning
+  when the error page is not in the bucket, and `host delete` with and without `--purge` (every page
+  of objects deleted, nothing deleted when the confirmation is declined)
+- the Lambda function (loaded from its file, S3 client and HTTP pool replaced by mocks): the
+  URL-encoded key decoded, the result saved as `.json` with `application/json`, non-images
+  skipped, the API Ninjas request (header, form field), a missing key or an API error saved as
+  `{"error"}` without crashing, and the Hugging Face provider
+- `detection.py`: the zip contains only the handler, the `LabRole` ARN, create vs update of the
+  function (with the right waiter), the permission limited to the bucket and account (and an
+  existing one ignored), other bucket notifications kept and old triggers replaced, the permission
+  added before the trigger, polling and timeout for the result (fake clock), an old result deleted
+  before uploading, `.gif` rejected, both API answer formats, and the `detect` command output
+  (missing key in `.env`, region of the bucket, role from `.env`)
 
 I also tested all commands manually against a real AWS account.
 
@@ -825,6 +982,8 @@ I also tested all commands manually against a real AWS account.
 - adding a lifecycle rule without replacing the existing ones
 - `host deploy --delete-removed` to delete files that are not in the new build any more
 - CloudFront in front of the website bucket for HTTPS and a custom domain
+- drawing the detected boxes onto the image (Pillow) and saving it next to the JSON
+- the API key in AWS Secrets Manager instead of a Lambda environment variable
 
 ## Troubleshooting
 
@@ -842,6 +1001,17 @@ you use the website URL (`s3-website`) printed by the command, not the normal bu
 Upload the build output, not the source: `npm run build` in `static_web_page/react-app/`, then
 deploy `static_web_page/react-app/dist`. If the page is still blank, check the browser's DevTools
 → Network tab: `.js` files must have `Content-Type: text/javascript`.
+
+**`detect image` says `No result ... after 60 seconds`.**
+Open the function's logs: Lambda console → `object-detection` → *Monitor* → *View CloudWatch logs*.
+A `.json` with `"error": "Invalid API Key."` means the key in `.env` is wrong (fix it and run
+`detect deploy` again; `detect local` tests it without AWS). No log at all means the trigger did not
+fire: check S3 console → the bucket → *Properties* → *Event notifications*.
+
+**`detect deploy` fails with `InvalidParameterValueException` or `AccessDeniedException`.**
+The role can't be used. In AWS Academy use the default (`LabRole`); otherwise pass `--role-arn` with
+a role that Lambda can assume. A role created a few seconds ago may need a moment before Lambda
+accepts it.
 
 **`https://` does not work for the website.**
 The S3 website endpoint is HTTP only. Use `http://`, or put CloudFront in front of it.

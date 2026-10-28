@@ -1,4 +1,5 @@
-"""Static website hosting: turn a bucket into a website and upload an HTML page or a built React app."""
+"""Static website hosting: turn a bucket into a website, upload an HTML page or a built React app,
+and take it down again."""
 
 import logging
 import mimetypes
@@ -170,18 +171,62 @@ def check_site_folder(path):
         raise ValueError(message)
 
 
-def host_static_website(client, bucket, path, spa=False):
+def find_error_document(path, error_document):
+    """Return the local file of a custom error page, e.g. error.html.
+
+    For a folder it must be inside the folder, for a single file (index.html) next to it.
+    Raises ValueError if it is missing, so nothing is changed in AWS.
+    """
+    path = Path(path)
+    folder = path.parent if path.is_file() else path
+    file = folder / error_document
+    if not file.is_file():
+        raise ValueError(f"Error page '{error_document}' not found in '{folder}'.")
+    return file
+
+
+def host_static_website(client, bucket, path, spa=False, error_document=None):
     """Host a file or a folder as a public website in one step. Returns (uploaded keys, URL).
 
     Creates the bucket if needed, turns off Block Public Access, applies a public-read policy
     for the whole bucket (this replaces an existing bucket policy), turns on website hosting
     and uploads the files. With spa=True missing keys also get index.html (single page apps).
+    error_document is a custom "not found" page (e.g. error.html) instead; when a single file is
+    deployed, the error page next to it is uploaded too.
     """
+    if spa and error_document:
+        raise ValueError("Use either --spa or --error-document, not both.")
     check_site_folder(path)
+    error_file = find_error_document(path, error_document) if error_document else None
 
     buckets.ensure_bucket(client, bucket)
     policies.disable_block_public_access(client, bucket)
     policies.create_bucket_policy(client, bucket, policies.generate_public_read_policy(bucket))
-    set_bucket_website_policy(client, bucket, switch=True, error_document=INDEX_DOCUMENT if spa else None)
+    set_bucket_website_policy(
+        client, bucket, switch=True, error_document=INDEX_DOCUMENT if spa else error_document
+    )
     keys = static_web_page_file(client, bucket, path)
+    if error_file and Path(path).is_file():
+        # The key must match the website configuration, also for an error page in a subfolder.
+        folder = Path(error_document).parent.as_posix()
+        keys += static_web_page_file(client, bucket, error_file, prefix="" if folder == "." else folder)
     return keys, website_url(bucket, buckets.get_bucket_region(client, bucket))
+
+
+def delete_website(client, bucket, purge=False):
+    """Take a website down: turn off website hosting, and with purge=True delete every object.
+
+    Returns the number of deleted objects. The bucket and its bucket policy are kept. In a
+    versioned bucket delete_object only adds delete markers, so old versions stay.
+    """
+    if not buckets.bucket_exists(client, bucket):
+        raise ValueError(f"Bucket '{bucket}' does not exist.")
+
+    set_bucket_website_policy(client, bucket, switch=False)
+    if not purge:
+        return 0
+
+    items = objects.get_objects(client, bucket)
+    for item in items:
+        objects.delete_object(client, bucket, item["key"])
+    return len(items)

@@ -13,7 +13,7 @@ runner = CliRunner()
 @pytest.fixture(autouse=True)
 def fake_client(client, monkeypatch):
     """Make every CLI command use the fake client instead of a real boto3 client."""
-    monkeypatch.setattr(cli, "init_client", lambda region=None: client)
+    monkeypatch.setattr(cli, "init_client", lambda region=None, service="s3": client)
     return client
 
 
@@ -557,3 +557,162 @@ def test_host_status_shows_pages_and_url(client):
     assert "index page: index.html" in result.output
     assert "(S3 default 404 page)" in result.output
     assert "http://my-site.s3-website-us-east-1.amazonaws.com" in result.output
+
+
+def test_host_deploy_error_document_and_open(client, tmp_path, monkeypatch):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    (tmp_path / "index.html").write_text("<h1>Beka Lomsadze</h1>")
+    (tmp_path / "error.html").write_text("<h1>404</h1>")
+    opened = []
+    monkeypatch.setattr(cli.typer, "launch", opened.append)
+
+    result = runner.invoke(
+        cli.app,
+        ["host", "deploy", "my-site", str(tmp_path / "index.html"), "--error-document", "error.html", "--open"],
+    )
+
+    assert result.exit_code == 0
+    assert "Uploaded 2 file(s)" in result.output
+    assert opened == ["http://my-site.s3-website-us-east-1.amazonaws.com"]
+
+
+def test_host_config_rejects_spa_with_error_document(client):
+    result = runner.invoke(cli.app, ["host", "config", "my-site", "--enable", "--spa", "--error-document", "e.html"])
+
+    assert result.exit_code == 1
+    assert "either --spa or --error-document" in result.output
+    client.put_bucket_website.assert_not_called()
+
+
+def test_host_config_warns_when_error_page_is_missing(client):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    client.head_object.side_effect = make_client_error("404")
+
+    result = runner.invoke(cli.app, ["host", "config", "my-site", "--enable", "--error-document", "error.html"])
+
+    assert result.exit_code == 0
+    assert "Warning: 'error.html' is not in the bucket yet" in result.output
+    configuration = client.put_bucket_website.call_args.kwargs["WebsiteConfiguration"]
+    assert configuration["ErrorDocument"] == {"Key": "error.html"}
+
+
+def test_host_delete_keeps_files_without_purge(client):
+    result = runner.invoke(cli.app, ["host", "delete", "my-site", "-y"])
+
+    assert result.exit_code == 0
+    assert "turned off" in result.output
+    assert "Use --purge" in result.output
+    client.delete_bucket_website.assert_called_once_with(Bucket="my-site")
+    client.delete_object.assert_not_called()
+
+
+def test_host_delete_purge_reports_deleted_objects(client):
+    client.get_paginator.return_value.paginate.return_value = [
+        {"Contents": [{"Key": "index.html", "Size": 1, "LastModified": None}]}
+    ]
+
+    result = runner.invoke(cli.app, ["host", "delete", "my-site", "--purge", "-y"])
+
+    assert result.exit_code == 0
+    assert "Deleted 1 object(s)." in result.output
+
+
+def test_host_delete_does_nothing_when_not_confirmed(client):
+    result = runner.invoke(cli.app, ["host", "delete", "my-site", "--purge"], input="n\n")
+
+    assert result.exit_code == 1
+    client.delete_bucket_website.assert_not_called()
+
+
+@pytest.fixture
+def settings(monkeypatch):
+    """Fake .env settings for the detect commands."""
+    values = {"API_NINJAS_KEY": "test-key"}
+    monkeypatch.setattr(cli, "read_setting", values.get)
+    return values
+
+
+def test_detect_deploy_needs_api_key(client, settings):
+    settings.clear()
+
+    result = runner.invoke(cli.app, ["detect", "deploy", "my-photos"])
+
+    assert result.exit_code == 1
+    assert "Set API_NINJAS_KEY in .env first" in result.output
+    client.create_function.assert_not_called()
+
+
+def test_detect_deploy_creates_function_and_trigger(client, settings):
+    client.get_bucket_location.return_value = {"LocationConstraint": "eu-central-1"}
+    client.get_caller_identity.return_value = {"Account": "123456789012"}
+    client.get_function.side_effect = make_client_error("ResourceNotFoundException")
+    client.create_function.return_value = {"FunctionArn": "arn:aws:lambda:eu-central-1:1:function:object-detection"}
+    client.get_bucket_notification_configuration.return_value = {}
+
+    result = runner.invoke(cli.app, ["detect", "deploy", "my-photos"])
+
+    assert result.exit_code == 0
+    assert "Lambda function 'object-detection' created in eu-central-1 (api-ninjas)." in result.output
+    assert client.create_function.call_args.kwargs["Environment"] == {
+        "Variables": {"PROVIDER": "api-ninjas", "API_NINJAS_KEY": "test-key"}
+    }
+    client.put_bucket_notification_configuration.assert_called_once()
+
+
+def test_detect_deploy_uses_role_from_settings(client, settings):
+    settings["LAMBDA_ROLE_ARN"] = "arn:aws:iam::1:role/MyRole"
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    client.update_function_configuration.return_value = {"FunctionArn": "arn"}
+    client.get_bucket_notification_configuration.return_value = {}
+
+    result = runner.invoke(cli.app, ["detect", "deploy", "my-photos"])
+
+    assert result.exit_code == 0
+    assert "updated" in result.output
+    assert client.update_function_configuration.call_args.kwargs["Role"] == "arn:aws:iam::1:role/MyRole"
+
+
+def test_detect_image_prints_objects(client, tmp_path, monkeypatch):
+    photo = tmp_path / "cat.jpg"
+    photo.write_bytes(b"fake")
+    result_json = [
+        {"label": "cat", "confidence": "0.97", "bounding_box": {"x1": 1, "y1": 2, "x2": 3, "y2": 4}},
+        {"label": "sofa", "confidence": "0.31", "bounding_box": {"x1": 0, "y1": 0, "x2": 9, "y2": 9}},
+    ]
+    monkeypatch.setattr(cli.detection, "detect_image", lambda *args, **kwargs: ("cat.jpg", result_json))
+
+    result = runner.invoke(cli.app, ["detect", "image", "my-photos", str(photo)])
+
+    assert result.exit_code == 0
+    assert "result in s3://my-photos/cat.json" in result.output
+    assert "cat             0.97  box (1, 2) - (3, 4)" in result.output
+    assert "sofa" not in result.output
+    assert "1 object(s) found." in result.output
+
+
+def test_detect_local_calls_api_without_aws(client, settings, tmp_path, monkeypatch):
+    photo = tmp_path / "cat.jpg"
+    photo.write_bytes(b"fake")
+    calls = []
+    monkeypatch.setattr(cli.detection, "query_detection_api", lambda *args: calls.append(args) or [])
+
+    result = runner.invoke(cli.app, ["detect", "local", str(photo)])
+
+    assert result.exit_code == 0
+    assert calls == [(b"fake", "api-ninjas", "test-key")]
+    assert "No objects found" in result.output
+    assert client.mock_calls == []
+
+
+def test_detect_delete_removes_trigger_and_function(client):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    client.get_bucket_notification_configuration.return_value = {
+        "LambdaFunctionConfigurations": [{"Id": "object-detection-jpg"}]
+    }
+
+    result = runner.invoke(cli.app, ["detect", "delete", "my-photos", "-y"])
+
+    assert result.exit_code == 0
+    assert "Removed 1 trigger(s)" in result.output
+    assert "Lambda function 'object-detection' deleted." in result.output
+    client.delete_function.assert_called_once_with(FunctionName="object-detection")

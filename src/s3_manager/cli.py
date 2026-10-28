@@ -1,7 +1,8 @@
 """Command-line interface for s3-manager.
 
 This module only handles user interaction (arguments, prompts, output).
-The actual S3 work is done in buckets.py, objects.py, policies.py, lifecycle.py and website.py.
+The actual AWS work is done in buckets.py, objects.py, policies.py, lifecycle.py, website.py
+and detection.py.
 """
 
 import json
@@ -16,8 +17,8 @@ import typer
 from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, ParamValidationError
 
-from s3_manager import buckets, lifecycle, objects, policies, website
-from s3_manager.client import init_client
+from s3_manager import buckets, detection, lifecycle, objects, policies, website
+from s3_manager.client import init_client, read_setting
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +36,17 @@ lifecycle_app = typer.Typer(
 host_app = typer.Typer(
     help="Host a static website (a plain HTML page or a built React app) on S3.", no_args_is_help=True
 )
+detect_app = typer.Typer(
+    help="Detect objects on images with an AWS Lambda function (API Ninjas or Hugging Face).",
+    no_args_is_help=True,
+)
 
 app.add_typer(bucket_app, name="bucket")
 app.add_typer(object_app, name="object")
 app.add_typer(policy_app, name="policy")
 app.add_typer(lifecycle_app, name="lifecycle")
 app.add_typer(host_app, name="host")
+app.add_typer(detect_app, name="detect")
 
 # Friendlier messages for common AWS error codes.
 AWS_ERROR_MESSAGES = {
@@ -63,6 +69,9 @@ AWS_ERROR_MESSAGES = {
     "IllegalLocationConstraintException": "The region does not match the S3 endpoint. Check --region and S3_ENDPOINT_URL.",
     "OperationAborted": "Another request is changing this bucket right now, try again in a moment.",
     "NoSuchWebsiteConfiguration": "Static website hosting is not enabled on this bucket.",
+    "ResourceNotFoundException": "The Lambda function does not exist.",
+    "InvalidParameterValueException": "Lambda rejected the settings (often the role: check --role-arn / LabRole).",
+    "AccessDeniedException": "Access denied by Lambda. Check that your credentials may use Lambda and pass the role.",
 }
 
 
@@ -103,7 +112,7 @@ def main():
         fail(f"Download failed: {error}")
     except requests.RequestException as error:
         fail(f"Download failed: could not reach the URL ({type(error).__name__}).")
-    except ValueError as error:
+    except (ValueError, TimeoutError) as error:
         fail(str(error))
 
 
@@ -672,12 +681,31 @@ def host_deploy(
         Optional[str],
         typer.Option(help="Region for a new bucket, e.g. eu-central-1. Default: AWS_REGION from .env."),
     ] = None,
+    error_document: Annotated[
+        Optional[str],
+        typer.Option(
+            "--error-document",
+            help="Custom 'not found' page, e.g. error.html. It must be in the folder, or next to the "
+            "deployed file (then it is uploaded too).",
+        ),
+    ] = None,
+    open_browser: Annotated[
+        bool, typer.Option("--open", help="Open the website in the browser afterwards.")
+    ] = False,
 ):
     """Host a page or a folder as a public website in one step: create the bucket if needed,
     make it publicly readable (replaces its bucket policy), turn on website hosting, upload."""
-    keys, url = website.host_static_website(init_client(region=region), bucket, path, spa=spa)
+    keys, url = website.host_static_website(
+        init_client(region=region), bucket, path, spa=spa, error_document=error_document
+    )
     typer.echo(f"Uploaded {len(keys)} file(s) to '{bucket}'.")
+    show_website_url(url, open_browser)
+
+
+def show_website_url(url, open_browser=False):
     typer.echo(f"Website: {url}")
+    if open_browser:
+        typer.launch(url)
 
 
 @host_app.command("config")
@@ -688,11 +716,21 @@ def host_config(
     spa: Annotated[
         bool, typer.Option("--spa", help="With --enable: show index.html for unknown paths too (React).")
     ] = False,
+    error_document: Annotated[
+        Optional[str],
+        typer.Option("--error-document", help="With --enable: key of a custom 'not found' page, e.g. error.html."),
+    ] = None,
+    open_browser: Annotated[
+        bool, typer.Option("--open", help="With --enable: open the website in the browser.")
+    ] = False,
 ):
     """Turn static website hosting on with --enable (index.html) or off with --disable.
     The files and the bucket policy are not changed."""
     if enable == disable:
         typer.echo("Use either --enable or --disable.")
+        raise typer.Exit(code=1)
+    if spa and error_document:
+        typer.echo("Use either --spa or --error-document, not both.")
         raise typer.Exit(code=1)
 
     client = init_client()
@@ -700,11 +738,13 @@ def host_config(
         typer.echo(f"Bucket '{bucket}' does not exist.")
         raise typer.Exit(code=1)
 
-    error_document = website.INDEX_DOCUMENT if spa else None
+    error_document = website.INDEX_DOCUMENT if spa else error_document
     website.set_bucket_website_policy(client, bucket, switch=enable, error_document=error_document)
     if enable:
         typer.echo(f"Static website hosting turned on for '{bucket}'.")
-        typer.echo(f"Website: {website.website_url(bucket, buckets.get_bucket_region(client, bucket))}")
+        if error_document and objects.get_object_info(client, bucket, error_document) is None:
+            typer.echo(f"Warning: '{error_document}' is not in the bucket yet. Upload it with 'host upload'.")
+        show_website_url(website.website_url(bucket, buckets.get_bucket_region(client, bucket)), open_browser)
     else:
         typer.echo(f"Static website hosting turned off for '{bucket}'.")
 
@@ -729,6 +769,9 @@ def host_upload(
 @host_app.command("status")
 def host_status(
     bucket: Annotated[str, typer.Argument(help="Name of the bucket.")],
+    open_browser: Annotated[
+        bool, typer.Option("--open", help="Open the website in the browser if hosting is on.")
+    ] = False,
 ):
     """Show whether static website hosting is on, its index/error page and the website URL."""
     client = init_client()
@@ -739,4 +782,148 @@ def host_status(
     typer.echo(f"Static website hosting is enabled on '{bucket}'.")
     typer.echo(f"  index page: {config['index']}")
     typer.echo(f"  error page: {config['error'] or '(S3 default 404 page)'}")
-    typer.echo(f"Website: {website.website_url(bucket, buckets.get_bucket_region(client, bucket))}")
+    show_website_url(website.website_url(bucket, buckets.get_bucket_region(client, bucket)), open_browser)
+
+
+@host_app.command("delete")
+def host_delete(
+    bucket: Annotated[str, typer.Argument(help="Bucket of the website.")],
+    purge: Annotated[
+        bool, typer.Option("--purge", help="Also delete every object in the bucket (the website files).")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+):
+    """Take a website down: turn off website hosting, with --purge also delete all files.
+    The bucket and its bucket policy are kept."""
+    if not yes:
+        question = f"Turn off the website on '{bucket}'"
+        question += " and delete ALL objects in it?" if purge else "?"
+        typer.confirm(question, abort=True)
+
+    deleted = website.delete_website(init_client(), bucket, purge=purge)
+    typer.echo(f"Static website hosting turned off for '{bucket}'.")
+    if purge:
+        typer.echo(f"Deleted {deleted} object(s).")
+    else:
+        typer.echo("The files are still in the bucket and public through its bucket policy. Use --purge to delete them.")
+
+
+# ---------- detect commands ----------
+
+def require_api_key(provider):
+    """Return the API key of the provider from .env, or stop with a hint."""
+    if provider not in detection.PROVIDERS:
+        typer.echo(f"Provider must be one of {', '.join(detection.PROVIDERS)}, got '{provider}'.")
+        raise typer.Exit(code=1)
+    name = detection.PROVIDER_KEYS[provider]
+    api_key = read_setting(name)
+    if not api_key:
+        typer.echo(f"Set {name} in .env first (free key for api-ninjas: https://api-ninjas.com).")
+        raise typer.Exit(code=1)
+    return api_key
+
+
+def print_detections(detections, min_confidence):
+    if not detections:
+        typer.echo(f"No objects found with confidence >= {min_confidence}.")
+        return
+    for item in detections:
+        x1, y1, x2, y2 = item["box"]
+        typer.echo(f"{item['label']:<15} {item['confidence']:.2f}  box ({x1}, {y1}) - ({x2}, {y2})")
+    typer.echo(f"{len(detections)} object(s) found.")
+
+
+@detect_app.command("deploy")
+def detect_deploy(
+    bucket: Annotated[str, typer.Argument(help="Bucket whose new images should be analysed.")],
+    function_name: Annotated[
+        str, typer.Option("--function-name", help="Name of the Lambda function.")
+    ] = detection.DEFAULT_FUNCTION_NAME,
+    provider: Annotated[
+        str, typer.Option(help="Detection API: 'api-ninjas' (free, no card) or 'huggingface'.")
+    ] = "api-ninjas",
+    role_arn: Annotated[
+        Optional[str],
+        typer.Option(help="IAM role of the function. Default: LAMBDA_ROLE_ARN from .env, else LabRole (AWS Academy)."),
+    ] = None,
+):
+    """Create (or update) the object detection Lambda function in the bucket's region and call it
+    for every new .jpg / .jpeg / .png in the bucket. The API key from .env goes into its settings."""
+    api_key = require_api_key(provider)
+    s3_client = init_client()
+    if not buckets.bucket_exists(s3_client, bucket):
+        typer.echo(f"Bucket '{bucket}' does not exist.")
+        raise typer.Exit(code=1)
+
+    region = buckets.get_bucket_region(s3_client, bucket)
+    arn, created = detection.deploy_object_detection(
+        s3_client,
+        init_client(region=region, service="lambda"),
+        init_client(region=region, service="sts"),
+        bucket,
+        provider,
+        api_key,
+        role_arn=role_arn or read_setting("LAMBDA_ROLE_ARN"),
+        function_name=function_name,
+    )
+    typer.echo(f"Lambda function '{function_name}' {'created' if created else 'updated'} in {region} ({provider}).")
+    typer.echo(f"  {arn}")
+    typer.echo(f"New .jpg / .jpeg / .png files in '{bucket}' now get a .json result next to them.")
+    typer.echo(f"Try it: s3-manager detect image {bucket} photo.jpg")
+
+
+@detect_app.command("image")
+def detect_image(
+    bucket: Annotated[str, typer.Argument(help="Bucket connected with 'detect deploy'.")],
+    path: Annotated[Path, typer.Argument(help="Local .jpg / .jpeg / .png image.", exists=True, dir_okay=False)],
+    key: Annotated[Optional[str], typer.Option(help="Object key in S3. Defaults to the file name.")] = None,
+    timeout: Annotated[int, typer.Option(help="Seconds to wait for the result.")] = 60,
+    min_confidence: Annotated[
+        float, typer.Option(help="Only show objects with at least this confidence (0-1).")
+    ] = 0.5,
+):
+    """Upload an image, wait until the Lambda function saved its .json result, and show the objects."""
+    key, result = detection.detect_image(init_client(), path, bucket, key=key, timeout=timeout)
+    typer.echo(f"Uploaded s3://{bucket}/{key}, result in s3://{bucket}/{detection.result_key(key)}")
+    print_detections(detection.normalize_detections(result, min_confidence), min_confidence)
+
+
+@detect_app.command("local")
+def detect_local(
+    path: Annotated[Path, typer.Argument(help="Local image.", exists=True, dir_okay=False)],
+    provider: Annotated[
+        str, typer.Option(help="Detection API: 'api-ninjas' (free, no card) or 'huggingface'.")
+    ] = "api-ninjas",
+    min_confidence: Annotated[
+        float, typer.Option(help="Only show objects with at least this confidence (0-1).")
+    ] = 0.5,
+):
+    """Send an image straight to the detection API, without AWS. Good for testing the API key."""
+    api_key = require_api_key(provider)
+    result = detection.query_detection_api(path.read_bytes(), provider, api_key)
+    print_detections(detection.normalize_detections(result, min_confidence), min_confidence)
+
+
+@detect_app.command("delete")
+def detect_delete(
+    bucket: Annotated[str, typer.Argument(help="Bucket connected with 'detect deploy'.")],
+    function_name: Annotated[
+        str, typer.Option("--function-name", help="Name of the Lambda function.")
+    ] = detection.DEFAULT_FUNCTION_NAME,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+):
+    """Remove the image triggers from the bucket and delete the Lambda function.
+    The images and .json results stay in the bucket."""
+    if not yes:
+        typer.confirm(f"Delete Lambda function '{function_name}' and its triggers on '{bucket}'?", abort=True)
+
+    s3_client = init_client()
+    region = buckets.get_bucket_region(s3_client, bucket)
+    removed, deleted = detection.remove_object_detection(
+        s3_client, init_client(region=region, service="lambda"), bucket, function_name
+    )
+    typer.echo(f"Removed {removed} trigger(s) from '{bucket}'.")
+    if deleted:
+        typer.echo(f"Lambda function '{function_name}' deleted.")
+    else:
+        typer.echo(f"Lambda function '{function_name}' does not exist.")
