@@ -62,8 +62,14 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   it to the bucket, so every new `.jpg` / `.jpeg` / `.png` is sent to the free
   [API Ninjas Object Detection](https://api-ninjas.com/api/objectdetection) API (or Hugging Face) and
   the result is saved next to the image as JSON (`cat.jpg` → `cat.json`). `detect image` uploads an
-  image and prints the detected objects, `detect local` calls the API without AWS, `detect delete`
-  removes everything again
+  image and prints the detected objects (`--output photo.json` also saves the model's answer
+  locally), `detect local` calls the API without AWS, `detect delete` removes everything again
+- **Organize by extension with AWS Lambda:** `organize deploy BUCKET` creates a second Lambda
+  function (role `LabRole`) that runs for every new file in the bucket and moves it into a folder
+  named after its extension (`demo.csv` → `csv/demo.csv`), so files are sorted the moment they are
+  uploaded. It is the automatic version of `bucket organize -ext`. `organize delete` removes it
+- **Running the lecture's Lambda from the AWS console:** step-by-step instructions and sample test
+  events in `aws_lambda/events/` (see [Running a Lambda function from the AWS console](#running-a-lambda-function-from-the-aws-console))
 - **Inspirational quotes:** `quote --inspire` prints a random quote from the
   [Quotable API](https://api.quotable.kurokeita.dev/), `quote --inspire "Nelson Mandela"` a quote by
   that author, and `quote BUCKET --inspire "Nelson Mandela" --save` also saves the quote as a `.json`
@@ -85,7 +91,7 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
 | [requests](https://requests.readthedocs.io/) | downloads files from URLs |
 | [python-magic](https://github.com/ahupp/python-magic) | detects the real file type of downloads and `--by-type` uploads (wrapper around the `libmagic` C library) |
 | `logging` (standard library) | operation logs |
-| [AWS Lambda](https://docs.aws.amazon.com/lambda/) + [urllib3](https://urllib3.readthedocs.io/) | the object detection function (`aws_lambda/object_detection.py`); urllib3 is already in the Lambda runtime, so no layer is needed |
+| [AWS Lambda](https://docs.aws.amazon.com/lambda/) + [urllib3](https://urllib3.readthedocs.io/) | the object detection function (`aws_lambda/object_detection.py`) and the organize-by-extension function (`aws_lambda/organize_by_extension.py`); urllib3 is already in the Lambda runtime, so no layer is needed |
 | [API Ninjas Object Detection](https://api-ninjas.com/api/objectdetection) | free object detection API (no bank card); Hugging Face `facebook/detr-resnet-50` as an option |
 | [pytest](https://docs.pytest.org/) | unit tests |
 | [Node.js](https://nodejs.org/) + [Vite](https://vite.dev/) + [React](https://react.dev/) | only for building the React demo site in `static_web_page/react-app/` |
@@ -237,7 +243,16 @@ poetry run s3-manager bucket create beka-detect-2026
 poetry run s3-manager detect deploy beka-detect-2026          # function + permission + trigger
 poetry run s3-manager detect image beka-detect-2026 ./photo.jpg   # upload, wait for photo.json, print it
 poetry run s3-manager object list beka-detect-2026            # photo.jpg and photo.json
+poetry run s3-manager detect image beka-detect-2026 ./photo.jpg --output photo.json
+#   -> photo.jpg + photo.json are the image and the ML model's answer (the assignment submission)
 poetry run s3-manager detect delete beka-detect-2026          # trigger + function removed
+
+# 10b. organize new files by extension with Lambda (a different bucket than detection!)
+poetry run s3-manager bucket create beka-organize-2026
+poetry run s3-manager organize deploy beka-organize-2026      # function + permission + trigger
+poetry run s3-manager object upload ./demo.csv beka-organize-2026
+poetry run s3-manager object list beka-organize-2026          # a few seconds later: csv/demo.csv
+poetry run s3-manager organize delete beka-organize-2026      # trigger + function removed
 
 # 11. inspirational quotes (see "Inspirational quotes" below)
 poetry run s3-manager quote --inspire                         # random quote, no AWS needed
@@ -392,9 +407,11 @@ command: `s3-manager -v bucket list`.
 | `host status BUCKET [--open]` | Show whether website hosting is on, its index and error page, and the website URL |
 | `host delete BUCKET [--purge] [-y]` | Take a website down: turn website hosting off. With `--purge` also delete every object in the bucket. The bucket and its policy stay. Asks for confirmation unless `-y`. |
 | `detect deploy BUCKET [--provider api-ninjas\|huggingface] [--function-name object-detection] [--role-arn ARN]` | Create (or update) the object detection Lambda function in the bucket's region with the API key from `.env`, allow S3 to call it, and call it for every new `.jpg` / `.jpeg` / `.png` in the bucket. |
-| `detect image BUCKET FILE [--key K] [--timeout 60] [--min-confidence 0.5]` | Upload an image (type checked with python-magic), wait for the `.json` result the function writes, and print each object with its confidence and box |
+| `detect image BUCKET FILE [--key K] [--timeout 60] [--min-confidence 0.5] [--output FILE]` | Upload an image (type checked with python-magic), wait for the `.json` result the function writes, and print each object with its confidence and box. `--output` also saves the model's full answer to a local file. |
 | `detect local FILE [--provider ...] [--min-confidence 0.5]` | Send an image straight to the API, without AWS (to test the key) |
 | `detect delete BUCKET [--function-name ...] [-y]` | Remove the image triggers from the bucket and delete the function. Images and results stay. |
+| `organize deploy BUCKET [--function-name organize-by-extension] [--role-arn ARN] [--unknown]` | Create (or update) the organize Lambda function in the bucket's region, allow S3 to call it, and call it for every new object in the bucket. New root-level files are moved to `<extension>/<name>`; with `--unknown` files without an extension go to `unknown/`. Refuses a bucket that has the detection trigger (exit code `1`). |
+| `organize delete BUCKET [--function-name ...] [-y]` | Remove the trigger from the bucket and delete the function. Moved files stay where they are. |
 | `quote [BUCKET] --inspire [AUTHOR] [--save] [--key KEY]` | `--inspire`: print a random quote; `--inspire "AUTHOR"`: a random quote by that author (full name or slug, exit code `1` if the API has none). `--save`: also save the quote as JSON in BUCKET, under `quotes/<author-slug>/<id>.json` or `--key` (`.json` is added if missing). BUCKET goes before `--inspire`. Without `--inspire`: show a hint (exit code `1`). |
 
 Every command has its own help, e.g. `poetry run s3-manager object upload --help`.
@@ -533,6 +550,16 @@ JSON next to the image). The function is in `aws_lambda/object_detection.py`; th
 | `query_detection_api()` | `detection.py` | `detect local` |
 | `remove_object_detection()` | `detection.py` | `detect delete` |
 
+Added for the lecture 5 Lambda assignment ("write a Lambda function that moves a file stored as
+an S3 object into a folder corresponding to its file extension", role `LabRole`):
+
+| Function | Module | Used by |
+|---|---|---|
+| `lambda_handler()` | `aws_lambda/organize_by_extension.py` | Lambda, for every new object in the bucket |
+| `extension_folder()`, `move_object()` | `aws_lambda/organize_by_extension.py` | the handler (same rules as in `objects.py`, copied because the function is deployed on its own) |
+| `deploy_organizer()`, `set_organize_trigger()` | `organizer.py` | `organize deploy` (reuses `build_lambda_zip()`, `deploy_detection_lambda()`, `allow_s3_invoke()` from `detection.py`) |
+| `remove_organizer()` | `organizer.py` | `organize delete` |
+
 Added for the lecture 5 "inspire" script (`main.py` with `get_quote()` and `print_quote()`, turned
 into the `quote` command with `--inspire` and `--save`):
 
@@ -606,10 +633,13 @@ s3-manager/
 │   │                  # host_static_website, delete_website
 │   ├── detection.py   # build_lambda_zip, deploy_detection_lambda, allow_s3_invoke,
 │   │                  # set_detection_trigger, wait_for_result, normalize_detections, ...
+│   ├── organizer.py   # deploy_organizer, set_organize_trigger, remove_organizer
 │   └── quotes.py      # get_quote, format_quote, quote_key, save_quote
 ├── aws_lambda/
-│   └── object_detection.py  # the Lambda function: lambda_handler, query_image, query_api_ninjas,
-│                            # query_huggingface (deployed on its own, so no s3_manager imports)
+│   ├── object_detection.py  # the Lambda function: lambda_handler, query_image, query_api_ninjas,
+│   │                        # query_huggingface (deployed on its own, so no s3_manager imports)
+│   ├── organize_by_extension.py  # the Lambda function: lambda_handler, extension_folder, move_object
+│   └── events/              # sample S3 events for the Lambda console's Test tab
 ├── static_web_page/
 │   ├── index.html     # the simple site: a page with my first and last name
 │   ├── error.html     # custom 404 page for --error-document
@@ -950,6 +980,68 @@ exists, and prints the objects above `--min-confidence`. If no result appears wi
 the function's logs are in CloudWatch (Lambda console → the function → *Monitor* → *View
 CloudWatch logs*).
 
+### Organizing files with AWS Lambda
+
+```text
+upload demo.csv ──> S3 bucket ──"ObjectCreated" event──> Lambda: organize_by_extension.py
+                       ^   ^                                   │ copy_object demo.csv -> csv/demo.csv
+                       │   └────────── delete_object demo.csv <┤
+                       └─ "ObjectCreated" for csv/demo.csv ────┘ (key has "/": skipped)
+```
+
+**The function** (`aws_lambda/organize_by_extension.py`) gets one record per new object, decodes
+the key (`unquote_plus`, like the detection function), and moves `demo.csv` to `csv/demo.csv`. S3
+has no move, so it is `copy_object` (inside S3, nothing is downloaded) and `delete_object`. The
+folder is the extension in lower case, so `photo.JPG` and `photo.jpg` both go to `jpg/`. Files
+without an extension stay in place, or go to `unknown/` when the function has `MOVE_UNKNOWN=true`
+(`organize deploy --unknown`). Only the standard library and boto3 are used, so it is one file.
+
+**No endless loop.** The trigger has no filter, because every file must be moved. The copy is a
+new object as well, so S3 calls the function a second time for `csv/demo.csv`. Keys that already
+contain a `/` are skipped, so the second call does nothing and there is no third one. (The
+detection function solves the same problem with a suffix filter, which is not possible here.)
+
+**`organize deploy`** reuses the detection deploy code (zip, create or update the function with
+the `LabRole` role in the bucket's region, `add_permission` for S3, then the trigger); only the
+handler (`organize_by_extension.lambda_handler`) and the trigger differ. The trigger is one
+`s3:ObjectCreated:*` rule without a filter, added to the bucket's other notifications.
+
+**Why a different bucket than `detect`.** S3 refuses two Lambda triggers on one bucket whose
+event and prefix / suffix filters overlap (`Configurations overlap`), and a trigger without filter
+overlaps with everything. Even without that rule, the organizer would move the `.json` results to
+`json/` and every moved image would be detected again. So `organize deploy` checks the bucket first
+and stops with a message if `detect deploy` was used on it.
+
+### Running a Lambda function from the AWS console
+
+The assignment's first part is to run the lecture's `lambda_1.py` from the console (the CLI's
+`detect deploy` does the same steps in code):
+
+1. Lambda console → *Create function* → *Author from scratch*, name `lambda-1`, runtime
+   *Python 3.13*. Under *Change default execution role* pick *Use an existing role* → **LabRole**.
+2. In *Code*, replace `lambda_function.py` with the content of `lambda_1.py` and click *Deploy*.
+   The handler setting must stay `lambda_function.lambda_handler` (file name . function name).
+3. *Configuration* → *Environment variables*: `API_NINJAS_KEY` = your key from
+   [api-ninjas.com](https://api-ninjas.com).
+4. *Configuration* → *General configuration* → *Edit*: timeout **30 s**. The default is 3 s, which
+   is often too short for downloading the image and calling the API.
+5. *Add trigger* → S3 → your bucket, event *All object create events*, suffix `.jpg`. (Without a
+   suffix the function also runs for its own `.json` result; the lecture code skips `.json` keys
+   for that reason.)
+6. Upload a `.jpg` to the bucket (S3 console or `s3-manager object upload photo.jpg BUCKET`). After
+   a few seconds `photo.json` appears next to it: that is the ML model's answer.
+7. Logs: *Monitor* → *View CloudWatch logs*. The lecture code prints the event, the key and the
+   result, so everything shows up there.
+
+Without uploading anything, the *Test* tab can call the function with a fake S3 event: paste
+`aws_lambda/events/s3_put_image.json` and change the bucket name and key to an image that is already
+in your bucket. For the organizer the same works with `aws_lambda/organize_by_extension.py`
+(handler `lambda_function.lambda_handler` if pasted into `lambda_function.py`), a trigger without
+suffix, and `aws_lambda/events/s3_put_csv.json`.
+
+For the submission: the image (`photo.jpg`) and the model's answer (`photo.json`, download it from
+the bucket, or use `detect image BUCKET photo.jpg --output photo.json`).
+
 ### Inspirational quotes
 
 `quotes.py` calls `https://api.quotable.kurokeita.dev/api/quotes/random` with `requests` (with the
@@ -1076,6 +1168,15 @@ What is covered:
   added before the trigger, polling and timeout for the result (fake clock), an old result deleted
   before uploading, `.gif` rejected, both API answer formats, and the `detect` command output
   (missing key in `.env`, region of the bucket, role from `.env`)
+- the organize Lambda function (loaded from its file, S3 client mocked): `demo.csv` copied to
+  `csv/demo.csv` and the original deleted, URL-encoded keys decoded, upper-case extensions in a
+  lower-case folder, keys in a folder skipped (the copy's own event, so no loop), files without an
+  extension skipped or moved to `unknown/`, and several records in one event
+- `organizer.py`: other bucket notifications kept and an old trigger replaced, a bucket with the
+  detection trigger refused before any function is created, the handler and `MOVE_UNKNOWN` sent to
+  `create_function`, the zip contains only the handler, the permission added before the trigger,
+  and removing the trigger and function; `organize deploy` / `organize delete` output, a missing
+  bucket, and `detect image --output` writing the model's answer to a file
 - quotes (`requests.get` patched): no `author` parameter for a random quote, the author sent as
   `params`, `{}` from the API turned into "No quotes found for author 'Linus Torvalds'", the
   lecture's output format, the default key `quotes/<slug>/<id>.json`, the JSON body and
@@ -1129,6 +1230,16 @@ fire: check S3 console → the bucket → *Properties* → *Event notifications*
 The role can't be used. In AWS Academy use the default (`LabRole`); otherwise pass `--role-arn` with
 a role that Lambda can assume. A role created a few seconds ago may need a moment before Lambda
 accepts it.
+
+**`organize deploy` fails with `InvalidArgument: Configurations overlap`.**
+The bucket already has another event notification for new objects (for example one added in the
+console). A trigger without filter overlaps with every other `ObjectCreated` rule, so remove the
+other one (S3 console → the bucket → *Properties* → *Event notifications*) or use another bucket.
+
+**A file uploaded to the organize bucket is not moved.**
+Only files in the bucket root are moved (`notes/a.txt` stays), and files without an extension only
+with `--unknown`. Otherwise check the logs: Lambda console → `organize-by-extension` → *Monitor* →
+*View CloudWatch logs*.
 
 **`https://` does not work for the website.**
 The S3 website endpoint is HTTP only. Use `http://`, or put CloudFront in front of it.

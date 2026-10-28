@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -786,6 +787,73 @@ def test_detect_delete_removes_trigger_and_function(client):
     assert "Removed 1 trigger(s)" in result.output
     assert "Lambda function 'object-detection' deleted." in result.output
     client.delete_function.assert_called_once_with(FunctionName="object-detection")
+
+
+def test_detect_image_output_saves_model_answer(client, tmp_path, monkeypatch):
+    photo = tmp_path / "cat.jpg"
+    photo.write_bytes(b"fake")
+    result_json = [{"label": "cat", "confidence": "0.97", "bounding_box": {"x1": 1, "y1": 2, "x2": 3, "y2": 4}}]
+    monkeypatch.setattr(cli.detection, "detect_image", lambda *args, **kwargs: ("cat.jpg", result_json))
+    output = tmp_path / "cat.json"
+
+    result = runner.invoke(cli.app, ["detect", "image", "my-photos", str(photo), "--output", str(output)])
+
+    assert result.exit_code == 0
+    assert f"Saved the model's answer to {output}" in result.output
+    assert json.loads(output.read_text()) == result_json
+
+
+# ---------- organize ----------
+
+def test_organize_deploy_creates_function_and_trigger(client, settings):
+    client.get_bucket_location.return_value = {"LocationConstraint": "eu-central-1"}
+    client.get_caller_identity.return_value = {"Account": "123456789012"}
+    client.get_function.side_effect = make_client_error("ResourceNotFoundException")
+    client.create_function.return_value = {"FunctionArn": "arn:aws:lambda:eu-central-1:1:function:organize-by-extension"}
+    client.get_bucket_notification_configuration.return_value = {}
+
+    result = runner.invoke(cli.app, ["organize", "deploy", "my-files", "--unknown"])
+
+    assert result.exit_code == 0
+    assert "Lambda function 'organize-by-extension' created in eu-central-1." in result.output
+    assert client.create_function.call_args.kwargs["Environment"] == {"Variables": {"MOVE_UNKNOWN": "true"}}
+    client.put_bucket_notification_configuration.assert_called_once()
+
+
+def test_organize_deploy_reports_missing_bucket(client, settings):
+    client.head_bucket.side_effect = make_client_error("404")
+
+    result = runner.invoke(cli.app, ["organize", "deploy", "missing-bucket"])
+
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
+    client.create_function.assert_not_called()
+
+
+def test_organize_deploy_refuses_detection_bucket(client, settings):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    client.get_bucket_notification_configuration.return_value = {
+        "LambdaFunctionConfigurations": [{"Id": "object-detection-jpg"}]
+    }
+
+    result = runner.invoke(cli.app, ["organize", "deploy", "my-photos"])
+
+    assert result.exit_code == 1
+    assert "already runs the object detection function" in result.output
+    client.create_function.assert_not_called()
+
+
+def test_organize_delete_removes_trigger_and_function(client):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    client.get_bucket_notification_configuration.return_value = {
+        "LambdaFunctionConfigurations": [{"Id": "organize-by-extension"}]
+    }
+
+    result = runner.invoke(cli.app, ["organize", "delete", "my-files", "-y"])
+
+    assert result.exit_code == 0
+    assert "Removed 1 trigger(s)" in result.output
+    assert "Lambda function 'organize-by-extension' deleted." in result.output
 
 
 # ---------- quote ----------

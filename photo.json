@@ -1,0 +1,62 @@
+[
+  {
+    "label": "person",
+    "confidence": "0.52",
+    "bounding_box": {
+      "x1": "219",
+      "y1": "297",
+      "x2": "228",
+      "y2": "324"
+    }
+  },
+  {
+    "label": "person",
+    "confidence": "0.49",
+    "bounding_box": {
+      "x1": "209",
+      "y1": "297",
+      "x2": "218",
+      "y2": "320"
+    }
+  },
+  {
+    "label": "person",
+    "confidence": "0.4",
+    "bounding_box": {
+      "x1": "178",
+      "y1": "290",
+      "x2": "187",
+      "y2": "326"
+    }
+  },
+  {
+    "label": "person",
+    "confidence": "0.37",
+    "bounding_box": {
+      "x1": "88",
+      "y1": "287",
+      "x2": "100",
+      "y2": "305"
+    }
+  },
+  {
+    "label": "traffic light",
+    "confidence": "0.34",
+    "bounding_box": {
+      "x1": "262",
+      "y1": "145",
+      "x2": "290",
+      "y2": "190"
+    }
+  },
+  {
+    "label": "traffic light",
+    "confidence": "0.32",
+    "bounding_box": {
+      "x1": "195",
+      "y1": "283",
+      "x2": "215",
+      "y2": "307"
+    }
+  }
+]

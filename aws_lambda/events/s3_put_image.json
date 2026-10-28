@@ -1,0 +1,21 @@
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "us-east-1",
+      "eventName": "ObjectCreated:Put",
+      "s3": {
+        "s3SchemaVersion": "1.0",
+        "bucket": {
+          "name": "my-photos-bucket",
+          "arn": "arn:aws:s3:::my-photos-bucket"
+        },
+        "object": {
+          "key": "photo.jpg",
+          "size": 1024
+        }
+      }
+    }
+  ]
+}

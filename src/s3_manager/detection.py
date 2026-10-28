@@ -83,17 +83,24 @@ def function_exists(lambda_client, function_name):
 
 
 def deploy_detection_lambda(
-    lambda_client, zip_bytes, role_arn, function_name=DEFAULT_FUNCTION_NAME, environment=None
+    lambda_client,
+    zip_bytes,
+    role_arn,
+    function_name=DEFAULT_FUNCTION_NAME,
+    environment=None,
+    handler=LAMBDA_HANDLER,
+    description="Detects objects on images uploaded to S3 (s3-manager).",
 ):
     """Create the Lambda function, or update its code and settings if it exists.
 
     Returns (function ARN, True if it was created). Waits until the function is ready, because
     Lambda refuses changes while a create or update is still in progress.
+    handler and description let other functions (organizer.py) be deployed the same way.
     """
     settings = {
         "Role": role_arn,
         "Runtime": LAMBDA_RUNTIME,
-        "Handler": LAMBDA_HANDLER,
+        "Handler": handler,
         "Timeout": LAMBDA_TIMEOUT,
         "MemorySize": LAMBDA_MEMORY,
         "Environment": {"Variables": environment or {}},
@@ -111,7 +118,7 @@ def deploy_detection_lambda(
     response = lambda_client.create_function(
         FunctionName=function_name,
         Code={"ZipFile": zip_bytes},
-        Description="Detects objects on images uploaded to S3 (s3-manager).",
+        Description=description,
         **settings,
     )
     lambda_client.get_waiter("function_active_v2").wait(FunctionName=function_name)
