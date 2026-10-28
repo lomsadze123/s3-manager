@@ -54,6 +54,10 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   `Content-Type` and `Cache-Control`. `host config`, `host upload` and `host status` do the single steps.
   My own extra arguments: `--error-document error.html` (custom 404 page), `--open` (open the site in
   the browser) and `host delete [--purge]` (take the site down, optionally deleting its files)
+- **One-command hosting of a downloaded website:** `python main.py host BUCKET --source FOLDER`
+  uploads a project folder (here the [do-community/html_demo_site](https://github.com/do-community/html_demo_site)
+  source in `static_web_page/html_demo_site/`), sets the `WebsiteConfiguration`, makes the bucket
+  publicly readable and prints the website URL. It is a shortcut for `host deploy`
 - **Object detection with AWS Lambda:** `detect deploy BUCKET` creates a Lambda function and connects
   it to the bucket, so every new `.jpg` / `.jpeg` / `.png` is sent to the free
   [API Ninjas Object Detection](https://api-ninjas.com/api/objectdetection) API (or Hugging Face) and
@@ -219,6 +223,9 @@ poetry run s3-manager host deploy beka-site-2026 static_web_page/index.html --er
 poetry run s3-manager host status beka-site-2026 --open
 poetry run s3-manager host delete beka-site-2026            # hosting off, files stay
 poetry run s3-manager host delete beka-site-2026 --purge    # hosting off and every file deleted
+# a downloaded website (github.com/do-community/html_demo_site) with ONE command, as a script:
+poetry run python main.py host beka-demo-site-2026 --source static_web_page/html_demo_site
+poetry run python main.py host delete beka-demo-site-2026 --purge -y   # clean up
 
 # 10. object detection with Lambda (see "Object detection with AWS Lambda" below)
 poetry run s3-manager detect local ./photo.jpg                # test the API key, no AWS
@@ -303,6 +310,24 @@ INFO: Uploading static_web_page/index.html to s3://beka-site-2026/index.html (te
 Uploaded 1 file(s) to 'beka-site-2026'.
 Website: http://beka-site-2026.s3-website-us-east-1.amazonaws.com
 
+$ poetry run python main.py host beka-demo-site-2026 --source static_web_page/html_demo_site
+INFO: Creating bucket 'beka-demo-site-2026' in region us-east-1...
+INFO: Bucket 'beka-demo-site-2026' created successfully.
+INFO: Disabling Block Public Access for 'beka-demo-site-2026'...
+INFO: Applying bucket policy to 'beka-demo-site-2026'...
+INFO: Bucket policy applied.
+INFO: Turning on static website hosting for 'beka-demo-site-2026'...
+INFO: Static website hosting turned on.
+INFO: Uploading static_web_page/html_demo_site/LICENSE to s3://beka-demo-site-2026/LICENSE (text/plain; charset=utf-8)...
+INFO: Uploading static_web_page/html_demo_site/README.md to s3://beka-demo-site-2026/README.md (text/markdown; charset=utf-8)...
+INFO: Uploading static_web_page/html_demo_site/about.html to s3://beka-demo-site-2026/about.html (text/html; charset=utf-8)...
+INFO: Uploading static_web_page/html_demo_site/images/background.jpg to s3://beka-demo-site-2026/images/background.jpg (image/jpeg)...
+INFO: Uploading static_web_page/html_demo_site/images/large-profile.jpg to s3://beka-demo-site-2026/images/large-profile.jpg (image/jpeg)...
+INFO: Uploading static_web_page/html_demo_site/images/small-profile.jpeg to s3://beka-demo-site-2026/images/small-profile.jpeg (image/jpeg)...
+INFO: Uploading static_web_page/html_demo_site/index.html to s3://beka-demo-site-2026/index.html (text/html; charset=utf-8)...
+Uploaded 7 file(s) to 'beka-demo-site-2026'.
+Website: http://beka-demo-site-2026.s3-website-us-east-1.amazonaws.com
+
 $ poetry run s3-manager host deploy beka-react-2026 static_web_page/react-app
 ERROR: No index.html in 'static_web_page/react-app'. React project? Run 'npm run build' first and pass the dist/ folder.
 
@@ -349,7 +374,8 @@ command: `s3-manager -v bucket list`.
 | `lifecycle set BUCKET [--days 120] [--prefix P]` | Delete objects `--days` days after creation (whole bucket, or only under `--prefix`). Replaces existing lifecycle rules. |
 | `lifecycle get BUCKET` | Show the current lifecycle rules |
 | `lifecycle delete BUCKET [-y]` | Remove all lifecycle rules (asks for confirmation unless `-y`) |
-| `host deploy BUCKET PATH [--spa \| --error-document KEY] [--region R] [--open]` | Host a website in one step: create the bucket if it does not exist, turn off Block Public Access, apply a public-read policy for the whole bucket (**replaces** an existing bucket policy), turn on website hosting, upload, print the URL. PATH is an `index.html` or a folder with `index.html` at the top (a React app: its `dist/` folder). `--spa` also shows `index.html` for unknown paths. `--error-document error.html` shows that page instead (it must be in the folder, or next to the deployed file, which then uploads it too). `--open` opens the website in the browser. |
+| `host deploy BUCKET (PATH \| --source PATH) [--spa \| --error-document KEY] [--region R] [--open]` | Host a website in one step: create the bucket if it does not exist, turn off Block Public Access, apply a public-read policy for the whole bucket (**replaces** an existing bucket policy), turn on website hosting, upload, print the URL. PATH is an `index.html` or a folder with `index.html` at the top (a React app: its `dist/` folder), given as argument or with `--source` / `-s`. `--spa` also shows `index.html` for unknown paths. `--error-document error.html` shows that page instead (it must be in the folder, or next to the deployed file, which then uploads it too). `--open` opens the website in the browser. |
+| `host BUCKET --source PATH [options]` | Shortcut for `host deploy`: a first word that is not a host subcommand is the bucket. Same options as `host deploy`. A bucket named like a subcommand (`status`, `delete`, ...) needs `host deploy`. |
 | `host config BUCKET (--enable\|--disable) [--spa \| --error-document KEY] [--open]` | Only turn website hosting on (index document `index.html`) or off. Files and policy are not changed. With `--error-document` it warns if that key is not in the bucket yet. |
 | `host upload BUCKET PATH [--prefix P]` | Only upload a website file or folder (subfolders kept) with the right Content-Type and Cache-Control |
 | `host status BUCKET [--open]` | Show whether website hosting is on, its index and error page, and the website URL |
@@ -466,6 +492,20 @@ My own arguments, added for the "experiment by adding your own custom arguments"
 | `host deploy/config/status --open` | `typer.launch()` | opens the website in the browser |
 | `host delete [--purge]` | `delete_website()` | turns hosting off, with `--purge` deletes every object |
 
+Added for the "host a webpage's source code with a single command" task
+(`python main.py host "my-s3-static-host" --source "project_folder"`). The source is
+[do-community/html_demo_site](https://github.com/do-community/html_demo_site) (MIT, its `LICENSE` is
+kept), downloaded to `static_web_page/html_demo_site/`. `main.py` runs the same Typer CLI as
+`s3-manager`, and `host BUCKET --source FOLDER` runs `host deploy`, which already did every step:
+
+| Task step | Function | Module |
+|---|---|---|
+| upload the source code to the bucket (argument) | `ensure_bucket()`, `static_web_page_file()` | `buckets.py`, `website.py` |
+| configure the bucket with `WebsiteConfiguration` | `set_bucket_website_policy()` (`put_bucket_website`) | `website.py` |
+| set the permissions | `disable_block_public_access()`, `generate_public_read_policy()`, `create_bucket_policy()` | `policies.py` |
+| return the URL of the static webpage | `website_url()`, `get_bucket_region()` | `website.py`, `buckets.py` |
+| all of it in one command | `host_static_website()`, `DefaultDeployGroup` | `website.py`, `cli.py` |
+
 Added for the lecture 5 Lambda example (`lambda_1.py`: S3 trigger → object detection API →
 JSON next to the image). The function is in `aws_lambda/object_detection.py`; the CLI deploys it:
 
@@ -547,7 +587,9 @@ s3-manager/
 ├── static_web_page/
 │   ├── index.html     # the simple site: a page with my first and last name
 │   ├── error.html     # custom 404 page for --error-document
+│   ├── html_demo_site/  # source of github.com/do-community/html_demo_site (MIT) for main.py host
 │   └── react-app/     # the React demo (Vite): npm install && npm run build -> dist/
+├── main.py            # python main.py ... runs the same CLI as the s3-manager command
 ├── tests/             # pytest unit tests for each module and the CLI (no AWS account needed)
 ├── .env.example       # template for the .env file
 ├── pyproject.toml     # project metadata and dependencies
@@ -819,6 +861,16 @@ URL with the system's default browser. `host delete` is the opposite of `host de
 `delete_bucket_website`, and with `--purge` deletes every object. It does not remove the public-read
 policy or the bucket, so without `--purge` the files are still public through the normal S3 URL.
 
+**One command: `python main.py host BUCKET --source FOLDER`.** `main.py` adds `src/` to the import
+path and calls the same `main()` as the `s3-manager` command (the dependencies still come from the
+Poetry environment, so run it with `poetry run python main.py`). `host` is a Typer group, so
+normally its first word must be a subcommand. The group uses its own Click class,
+`DefaultDeployGroup`: when the first word is not a subcommand (and not an option like `--help`),
+it puts `deploy` in front, so `host my-bucket --source site/` becomes
+`host deploy my-bucket --source site/`. `host config/upload/status/delete` work as before; only a
+bucket named exactly like a subcommand needs `host deploy` written out. `--source` / `-s` is the
+same as the PATH argument; passing both or neither stops before any AWS call.
+
 ### Object detection with AWS Lambda
 
 ```text
@@ -956,6 +1008,10 @@ What is covered:
   key (also in a subfolder), `--open` calling `typer.launch` with the URL (patched), the warning
   when the error page is not in the bucket, and `host delete` with and without `--purge` (every page
   of objects deleted, nothing deleted when the confirmation is declined)
+- the one-command host task: `host BUCKET --source FOLDER` running every deploy step (public access,
+  policy, `WebsiteConfiguration`, upload, URL), `host deploy -s`, PATH and `--source` both or neither
+  rejected before any AWS call, `host status` still not taken as a bucket name, and `python main.py`
+  running the CLI (subprocess)
 - the Lambda function (loaded from its file, S3 client and HTTP pool replaced by mocks): the
   URL-encoded key decoded, the result saved as `.json` with `application/json`, non-images
   skipped, the API Ninjas request (header, form field), a missing key or an API error saved as

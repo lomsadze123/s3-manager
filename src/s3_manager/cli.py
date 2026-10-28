@@ -16,11 +16,26 @@ import requests
 import typer
 from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, ParamValidationError
+from typer.core import TyperGroup
 
 from s3_manager import buckets, detection, lifecycle, objects, policies, website
 from s3_manager.client import init_client, read_setting
 
 logger = logging.getLogger(__name__)
+
+
+class DefaultDeployGroup(TyperGroup):
+    """The host group: 'host BUCKET --source FOLDER' runs 'host deploy BUCKET --source FOLDER'.
+
+    If the first word is not a subcommand, it is a bucket name, so "deploy" is put in front.
+    A bucket named like a subcommand (e.g. "status") still needs 'host deploy status ...'.
+    """
+
+    def parse_args(self, ctx, args):
+        if args and not args[0].startswith("-") and args[0] not in self.commands:
+            args = ["deploy", *args]
+        return super().parse_args(ctx, args)
+
 
 app = typer.Typer(
     help="A simple CLI tool for working with S3-compatible storage.",
@@ -34,7 +49,10 @@ lifecycle_app = typer.Typer(
     help="Delete objects automatically some days after they were created.", no_args_is_help=True
 )
 host_app = typer.Typer(
-    help="Host a static website (a plain HTML page or a built React app) on S3.", no_args_is_help=True
+    cls=DefaultDeployGroup,
+    help="Host a static website (a plain HTML page or a built React app) on S3. "
+    "Shortcut: 'host BUCKET --source FOLDER' is the same as 'host deploy BUCKET --source FOLDER'.",
+    no_args_is_help=True,
 )
 detect_app = typer.Typer(
     help="Detect objects on images with an AWS Lambda function (API Ninjas or Hugging Face).",
@@ -667,12 +685,17 @@ def lifecycle_delete(
 def host_deploy(
     bucket: Annotated[str, typer.Argument(help="Bucket for the website. Created if it does not exist.")],
     path: Annotated[
-        Path,
+        Optional[Path],
         typer.Argument(
-            help="index.html, or a folder with index.html at the top (for React: the dist/ folder).",
+            help="index.html, or a folder with index.html at the top (for React: the dist/ folder). "
+            "Or pass it with --source.",
             exists=True,
         ),
-    ],
+    ] = None,
+    source: Annotated[
+        Optional[Path],
+        typer.Option("--source", "-s", help="Same as PATH: the page or the project folder to host.", exists=True),
+    ] = None,
     spa: Annotated[
         bool,
         typer.Option("--spa", help="Single page app (React): show index.html for unknown paths too."),
@@ -695,6 +718,11 @@ def host_deploy(
 ):
     """Host a page or a folder as a public website in one step: create the bucket if needed,
     make it publicly readable (replaces its bucket policy), turn on website hosting, upload."""
+    if (path is None) == (source is None):
+        typer.echo("Pass the website once: as PATH or with --source.")
+        raise typer.Exit(code=1)
+    path = path or source
+
     keys, url = website.host_static_website(
         init_client(region=region), bucket, path, spa=spa, error_document=error_document
     )

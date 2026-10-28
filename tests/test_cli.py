@@ -1,4 +1,7 @@
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import call
 
 import pytest
@@ -622,6 +625,73 @@ def test_host_delete_does_nothing_when_not_confirmed(client):
 
     assert result.exit_code == 1
     client.delete_bucket_website.assert_not_called()
+
+
+@pytest.fixture
+def demo_site(tmp_path):
+    """A small project folder like do-community/html_demo_site: two pages and an image."""
+    (tmp_path / "index.html").write_text("<h1>Sammy the Shark</h1>")
+    (tmp_path / "about.html").write_text("<p>About this site</p>")
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "background.jpg").write_bytes(b"\xff\xd8\xff")
+    return tmp_path
+
+
+def test_host_bucket_with_source_runs_deploy(client, demo_site):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+
+    result = runner.invoke(cli.app, ["host", "my-s3-static-host", "--source", str(demo_site)])
+
+    assert result.exit_code == 0
+    assert "Uploaded 3 file(s) to 'my-s3-static-host'." in result.output
+    assert "Website: http://my-s3-static-host.s3-website-us-east-1.amazonaws.com" in result.output
+    client.put_public_access_block.assert_called_once()
+    client.put_bucket_policy.assert_called_once()
+    client.put_bucket_website.assert_called_once_with(
+        Bucket="my-s3-static-host", WebsiteConfiguration={"IndexDocument": {"Suffix": "index.html"}}
+    )
+
+
+def test_host_deploy_accepts_source_option(client, demo_site):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+
+    result = runner.invoke(cli.app, ["host", "deploy", "my-site", "-s", str(demo_site)])
+
+    assert result.exit_code == 0
+    assert "Uploaded 3 file(s) to 'my-site'." in result.output
+
+
+@pytest.mark.parametrize("extra", [[], ["--source"]], ids=["no-path", "path-and-source"])
+def test_host_deploy_needs_path_or_source_once(client, demo_site, extra):
+    args = ["host", "my-site", str(demo_site), *extra, str(demo_site)] if extra else ["host", "my-site"]
+
+    result = runner.invoke(cli.app, args)
+
+    assert result.exit_code == 1
+    assert "as PATH or with --source" in result.output
+    client.put_bucket_website.assert_not_called()
+
+
+def test_host_subcommands_are_not_taken_as_bucket_names(client):
+    client.get_bucket_website.return_value = {"IndexDocument": {"Suffix": "index.html"}}
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+
+    result = runner.invoke(cli.app, ["host", "status", "my-site"])
+
+    assert result.exit_code == 0
+    assert "Static website hosting is enabled on 'my-site'." in result.output
+    client.put_bucket_website.assert_not_called()
+
+
+def test_main_py_runs_the_cli():
+    project = Path(__file__).resolve().parent.parent
+
+    result = subprocess.run(
+        [sys.executable, "main.py", "host", "deploy", "--help"], cwd=project, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0
+    assert "--source" in result.stdout
 
 
 @pytest.fixture
