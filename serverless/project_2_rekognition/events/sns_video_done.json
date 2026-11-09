@@ -1,0 +1,15 @@
+{
+  "Records": [
+    {
+      "EventSource": "aws:sns",
+      "EventVersion": "1.0",
+      "Sns": {
+        "Type": "Notification",
+        "TopicArn": "arn:aws:sns:us-east-1:123456789012:AmazonRekognition-rekognition-dev",
+        "Subject": null,
+        "Message": "{\"JobId\": \"PASTE-JOB-ID-FROM-THE-LOGS\", \"Status\": \"SUCCEEDED\", \"API\": \"StartLabelDetection\", \"Timestamp\": 1762700000000, \"Video\": {\"S3ObjectName\": \"video.mp4\", \"S3Bucket\": \"rekognition-media-123456789012-dev\"}}",
+        "Timestamp": "2026-11-09T12:00:00.000Z"
+      }
+    }
+  ]
+}

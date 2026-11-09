@@ -1,0 +1,14 @@
+{
+  "name": "s3-manager-serverless",
+  "private": true,
+  "description": "Lecture 6: Project 1 (serverless form) and Project 2 (AWS Rekognition), deployed with Serverless Framework v3",
+  "scripts": {
+    "deploy:form": "cd project_1_form && serverless deploy",
+    "remove:form": "cd project_1_form && serverless remove",
+    "deploy:rekognition": "cd project_2_rekognition && serverless deploy",
+    "remove:rekognition": "cd project_2_rekognition && serverless remove"
+  },
+  "devDependencies": {
+    "serverless": "^3.38.0"
+  }
+}

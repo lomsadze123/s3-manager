@@ -80,6 +80,18 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   removes it (see [Image analysis with AWS Lambda](#image-analysis-with-aws-lambda))
 - **Running the lecture's Lambda from the AWS console:** step-by-step instructions and sample test
   events in `aws_lambda/events/` (see [Running a Lambda function from the AWS console](#running-a-lambda-function-from-the-aws-console))
+- **Server-less form with API Gateway and DynamoDB (Lecture 6, Project 1):** `serverless/project_1_form/`
+  is a [Serverless Framework](https://www.serverless.com/framework/docs) project. One command
+  (`npm run deploy:form`) creates the Lambda functions, the REST API `SubmitFormAPI` (stage `prod`,
+  `GET /` shows the form, `POST /` saves it, CORS on) and the DynamoDB table `serverlessFORM-prod`.
+  In the lecture the table and the API were created by hand in the console, and the API URL had to be
+  pasted into `form.js` (see [Server-less form](#server-less-form-lecture-6-project-1))
+- **Image and video analysis with AWS Rekognition (Lecture 6, Project 2):**
+  `serverless/project_2_rekognition/` (`npm run deploy:rekognition`) creates a bucket where every new
+  `.jpeg` / `.jpg` / `.png` is labelled by Rekognition `DetectLabels`, and every `.mp4` starts a video
+  label job. When the job is done, Rekognition notifies SNS, which runs a second Lambda function. Both
+  save the labels in the DynamoDB table `rekognitionAnalyzeDB-dev` (see
+  [Image and video analysis with Rekognition](#image-and-video-analysis-with-rekognition-lecture-6-project-2))
 - **Inspirational quotes:** `quote --inspire` prints a random quote from the
   [Quotable API](https://api.quotable.kurokeita.dev/), `quote --inspire "Nelson Mandela"` a quote by
   that author, and `quote BUCKET --inspire "Nelson Mandela" --save` also saves the quote as a `.json`
@@ -107,6 +119,9 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
 | `concurrent.futures` (standard library) | the image analysis function calls the four endpoints in parallel |
 | [pytest](https://docs.pytest.org/) | unit tests |
 | [Node.js](https://nodejs.org/) + [Vite](https://vite.dev/) + [React](https://react.dev/) | only for building the React demo site in `static_web_page/react-app/` |
+| [Serverless Framework v3](https://www.serverless.com/framework/docs) (npm package `serverless`) | deploys the Lecture 6 projects in `serverless/` from a `serverless.yml` (CloudFormation under the hood). v3 like in the lecture: v4 needs a Serverless account login |
+| [Amazon API Gateway](https://docs.aws.amazon.com/apigateway/) + [DynamoDB](https://docs.aws.amazon.com/dynamodb/) | Project 1: the REST API in front of the form's Lambda functions, and the table for the submitted forms |
+| [Amazon Rekognition](https://docs.aws.amazon.com/rekognition/) + [SNS](https://docs.aws.amazon.com/sns/) | Project 2: labels for images and videos; SNS tells the second Lambda function that a video job is done |
 
 ## Installation
 
@@ -130,6 +145,13 @@ poetry install
 
 ```bash
 poetry run s3-manager --help
+```
+
+The Lecture 6 projects in `serverless/` are deployed with the Serverless Framework, which needs
+[Node.js](https://nodejs.org/) 18 or newer, and AWS credentials in `~/.aws/credentials`:
+
+```bash
+cd serverless && npm install      # Serverless Framework v3 into serverless/node_modules
 ```
 
 ## Environment variables
@@ -285,7 +307,18 @@ poetry run s3-manager quote my-unique-bucket-2026 --inspire "Nelson Mandela" --s
 #   -> saved to s3://my-unique-bucket-2026/quotes/nelson-mandela/<id>.json
 poetry run s3-manager quote my-unique-bucket-2026 --inspire --save --key quotes/today.json
 
-# 12. clean up (the bucket must be empty before deleting)
+# 12. Lecture 6: server-less form and Rekognition (Node.js + Serverless Framework v3, see below)
+cd serverless && npm install                                  # once
+npm run deploy:form                                           # Lambda + API Gateway + DynamoDB table
+#   -> endpoints:
+#        POST - https://abc123.execute-api.us-east-1.amazonaws.com/prod/
+#        GET - https://abc123.execute-api.us-east-1.amazonaws.com/prod/    <- open it, fill in the form
+npm run deploy:rekognition                                    # bucket + 2 Lambdas + SNS topic + DynamoDB
+cd .. && poetry run s3-manager object upload ./photo.jpg rekognition-media-<account-id>-dev
+#   -> a few seconds later the labels are in the DynamoDB table rekognitionAnalyzeDB-dev
+cd serverless && npm run remove:form                          # deletes the API, functions and table
+
+# 13. clean up (the bucket must be empty before deleting)
 poetry run s3-manager bucket delete my-unique-bucket-2026
 ```
 
@@ -615,6 +648,23 @@ into the `quote` command with `--inspire` and `--save`):
 | `format_quote()` (the lecture's `print_quote()`, returns the text so the CLI prints it) | `quotes.py` | `quote --inspire` |
 | `quote_key()`, `save_quote()` | `quotes.py` | `quote BUCKET --inspire --save` |
 
+Lecture 6 (Serverless Framework projects in `serverless/`, deployed with `npm run deploy:*`, not
+with the CLI). The lecture's function names are kept:
+
+| Function | File | What it does |
+|---|---|---|
+| `lambda_handler()` | `serverless/project_1_form/handler.py` | `POST /`: checks the 6 form fields and saves them (400 / 500 / 200 answers) |
+| `save_to_dynamodb()` | `serverless/project_1_form/handler.py` | one form → one DynamoDB item (`id`, the fields, `createdAt`, `updatedAt`) |
+| `show_form()`, `api_url()` | `serverless/project_1_form/handler.py` | `GET /`: the form page with this API's URL already written into it |
+| `response()`, `read_body()`, `missing_fields()` | `serverless/project_1_form/handler.py` | API Gateway answer with CORS header, JSON body parsing, validation |
+| `start_processing_media()` | `serverless/project_2_rekognition/handler.py` | S3 trigger: images → labels now, `.mp4` → start a video job |
+| `get_image_labels()` | `serverless/project_2_rekognition/handler.py` | Rekognition `DetectLabels` (10 labels) |
+| `start_video_label_detection()` | `serverless/project_2_rekognition/handler.py` | Rekognition `StartLabelDetection`, reporting to the SNS topic |
+| `handle_label_detection()` | `serverless/project_2_rekognition/handler.py` | SNS trigger: the video job is done, save its labels |
+| `get_video_labels()`, `summarize_video_labels()` | `serverless/project_2_rekognition/handler.py` | read every page of video labels, one entry per label name |
+| `make_item()`, `put_labels_in_db()` | `serverless/project_2_rekognition/handler.py` | floats → `Decimal`, save one item per file in DynamoDB |
+| `media_extension()` | `serverless/project_2_rekognition/handler.py` | lower-case extension of the decoded key |
+
 The script's `-u_t put_object` and `-u_t multipart_upload` were already here as `--method small`
 and `--method large`, and `-l_v` as `object file -ver`.
 
@@ -651,6 +701,11 @@ Differences from the lecture code:
   returned, so `print_quote()` crashes with `KeyError` (here the error goes up and is shown as one
   line); the API answers an unknown author with `{}` and status 200, which also ends in that
   `KeyError` (here "No quotes found for author ..."); and `urlopen` has no timeout (here 10 seconds).
+- Lecture 6 changes: Project 1's `serverless.yml` now also creates the DynamoDB table and the API
+  Gateway (both were made by hand in the console), and Project 2 keeps a video's labels under
+  DynamoDB's 400 KB item limit. The full lists are in
+  [Server-less form](#server-less-form-lecture-6-project-1) and
+  [Image and video analysis with Rekognition](#image-and-video-analysis-with-rekognition-lecture-6-project-2).
 - The lecture fixes the permissions issue with `delete_public_access_block()`. This tool uses
   `put_public_access_block()` with all four settings set to `False`, which has the same effect but
   keeps an explicit configuration on the bucket. It is a separate step (`policy set-public`,
@@ -690,6 +745,17 @@ s3-manager/
 │   ├── image_analysis.py    # the Lambda function: lambda_handler, read_image, query_api_ninjas,
 │   │                        # query_celebrity, analyze_image, result_key, save_result
 │   └── events/              # sample S3 events for the Lambda console's Test tab (s3_put_sample.json)
+├── serverless/        # Lecture 6, deployed with Serverless Framework v3 (run `npm install` here once)
+│   ├── package.json   # serverless@3 + npm scripts deploy:form, remove:form, deploy:rekognition, remove:rekognition
+│   ├── project_1_form/          # Project 1: form -> API Gateway -> Lambda -> DynamoDB
+│   │   ├── serverless.yml       # the functions, API Gateway (GET / and POST /) and the DynamoDB table
+│   │   ├── handler.py           # lambda_handler, save_to_dynamodb, show_form, api_url, response
+│   │   ├── static-web/          # index.html (the lecture's form), js/form.js, js/config.js
+│   │   └── events/              # sample API Gateway events (post_form.json, get_form.json)
+│   └── project_2_rekognition/   # Project 2: S3 -> Lambda -> Rekognition (-> SNS -> Lambda) -> DynamoDB
+│       ├── serverless.yml       # the functions, S3 triggers, SNS topic and the DynamoDB table
+│       ├── handler.py           # start_processing_media, handle_label_detection, get_image_labels, ...
+│       └── events/              # sample S3 and SNS events (s3_put_image.json, sns_video_done.json, ...)
 ├── static_web_page/
 │   ├── index.html     # the simple site: a page with my first and last name
 │   ├── error.html     # custom 404 page for --error-document
@@ -1187,6 +1253,150 @@ bucket name to yours and upload `sample.jpg` first).
 For the submission: the image and the four JSON files (`analyze image BUCKET sample.jpg
 --output-dir results` puts them into `results/json/`).
 
+### Server-less form (Lecture 6, Project 1)
+
+```text
+browser ──GET /──▶ API Gateway (SubmitFormAPI, stage prod) ──▶ showForm       → the form page
+browser ──POST /─▶ API Gateway                             ──▶ serverlessForm → DynamoDB serverlessFORM-prod
+```
+
+The [Serverless Framework](https://www.serverless.com/framework/docs) reads
+`serverless/project_1_form/serverless.yml`, turns it into a CloudFormation stack and deploys it. One
+`serverless deploy` creates:
+
+- two Lambda functions from `handler.py`: `serverlessForm` (the lecture's `lambda_handler`) and
+  `showForm`, both with the role **LabRole**
+- the REST API `SubmitFormAPI`, stage `prod`, with Lambda proxy integration (the request ends up in
+  `event`, like ticking *Use Lambda Proxy Integration* in the console), `POST /` with CORS (an
+  `OPTIONS` method is added for the browser's preflight request) and `GET /`
+- the DynamoDB table `serverlessFORM-prod`, partition key `id` (String), 1 read / 1 write capacity
+  unit (free tier)
+- the environment variable `DYNAMO_DB_TABLE`, so the code knows the table name
+
+Deploy and try it (the user's AWS credentials come from `~/.aws/credentials`, like the AWS CLI; in
+AWS Academy copy them from *AWS Details* → *AWS CLI*):
+
+```bash
+cd serverless
+npm install                       # installs Serverless Framework v3 into serverless/node_modules
+npm run deploy:form               # = cd project_1_form && serverless deploy
+npm run deploy:form -- --region us-west-2   # another region; --stage dev for a second copy
+```
+
+The output ends with the two endpoints. Open the `GET` URL in the browser, fill in the form and
+click *Submit*: "Form submitted!" appears, and the item is in DynamoDB console → *Tables* →
+`serverlessFORM-prod` → *Explore table items*. Without a browser:
+
+```bash
+curl -X POST https://abc123.execute-api.us-east-1.amazonaws.com/prod/ \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Beka", "email": "beka@example.com", "phone": "555", "address": "Tbilisi",
+       "programming_languages": "Python", "tools": "AWS"}'
+# {"message": "Data received Successfully", "id": "6f1c..."}
+curl -X POST https://abc123.execute-api.us-east-1.amazonaws.com/prod/ -d '{"name": "Beka"}'
+# {"message": "Missing or empty fields", "fields": ["email", "phone", "address", ...]}   (400)
+```
+
+`cd project_1_form && ../node_modules/.bin/serverless invoke -f serverlessForm -p events/post_form.json`
+calls the deployed function with a sample API Gateway event, and `serverless logs -f serverlessForm`
+shows its CloudWatch logs.
+
+**Why `GET /`?** The API URL only exists after the deploy, so in the lecture it had to be copied
+into `form.js` by hand. `show_form()` returns `static-web/index.html` with
+`window.FORM_API_URL = "https://<api-id>.execute-api.<region>.amazonaws.com/prod/"` written in
+(built from `event["requestContext"]`) and `form.js` inlined. The page then posts to the API it was
+loaded from, so nothing has to be edited.
+
+The lecture's other ways to host the page still work, but then the URL has to go into
+`static-web/js/config.js` (`window.FORM_API_URL = "<the POST endpoint>"`):
+
+```bash
+cd serverless/project_1_form/static-web && python -m http.server          # version 1: http://localhost:8000
+poetry run s3-manager host deploy beka-form-2026 serverless/project_1_form/static-web   # version 2: my S3 CLI
+```
+
+The page is then on another origin than the API, which is why `POST /` has CORS on and the Lambda
+answers with `Access-Control-Allow-Origin: *`.
+
+Changes compared with the lecture code:
+
+| Lecture | Here |
+|---|---|
+| DynamoDB table created by hand, the `resources` block in `serverless.yml` commented out (and its indentation broken: `Properties` under `Type`) | `resources.Resources.FormTable` creates the table, the name goes into `DYNAMO_DB_TABLE` |
+| API Gateway created by hand: new API, POST method, *Enable CORS*, *Deploy API* to `prod` | `events: - http: {path: /, method: post, cors: true}`, `apiName: SubmitFormAPI`, `stage: prod` |
+| API URL pasted into `form.js` | `GET /` serves the page with the URL filled in; `js/config.js` for other hosting |
+| LabRole ARN, region and table name copied into `configuration.json`, keys into `credentials.json` | `arn:aws:iam::${aws:accountId}:role/LabRole` filled in by Serverless, `--region` / `--stage` options, keys only in `~/.aws/credentials` (never in the project) |
+| always `200 "Data received Successfully"`, also when saving failed | `400` for a body that is not JSON or missing / empty fields (with their names), `500` when DynamoDB fails, `200` with the new `id` |
+| `KeyError` crash for a missing field | checked before saving |
+| `python3.9` (deprecated by Lambda), `datetime.utcnow()` (deprecated), `uuid1` | `python3.12`, `datetime.now(timezone.utc)`, `uuid4` |
+| `const URL = ...` in `form.js` hides the browser's `URL` class | `API_URL`, the error message from the API is shown, the form is reset after sending |
+
+`provider.iam.role` matters in AWS Academy: by default Serverless creates an IAM role for the
+functions, but Learner Lab accounts are not allowed to create roles. With `iam.role` set, no role is
+created and every function uses LabRole. `npm run remove:form` deletes the whole stack, the table
+and its items included.
+
+### Image and video analysis with Rekognition (Lecture 6, Project 2)
+
+```text
+.jpeg .jpg .png → S3 → startProcessingMedia → Rekognition DetectLabels ───────────────────────▶ DynamoDB
+.mp4            → S3 → startProcessingMedia → Rekognition StartLabelDetection
+                                              … video analysed … → SNS → handleLabelDetection ─▶ DynamoDB
+```
+
+`serverless/project_2_rekognition/serverless.yml` creates the bucket
+`rekognition-media-<account-id>-dev` with four triggers (one per suffix: `.mp4`, `.jpeg`, `.jpg`,
+`.png`, because an S3 rule has only one suffix), the two functions, the SNS topic
+`AmazonRekognition-rekognition-dev` with `handleLabelDetection` subscribed to it, and the DynamoDB
+table `rekognitionAnalyzeDB-dev`.
+
+Images are fast: `DetectLabels` answers right away and the 10 most confident labels are saved.
+Videos take longer, so `StartLabelDetection` only starts a job and gets the SNS topic and a role
+(`REKOGNITION_ROLE_ARN`, LabRole) that Rekognition uses to publish "job done" to it. The second
+function then reads every page of results with `GetLabelDetection`.
+
+```bash
+cd serverless && npm run deploy:rekognition
+cd .. && poetry run s3-manager object upload ./photo.jpg rekognition-media-<account-id>-dev
+# a free video: https://pixabay.com/videos/  (short .mp4 files are analysed in about a minute)
+poetry run s3-manager object upload ./video.mp4 rekognition-media-<account-id>-dev
+```
+
+The full bucket name is shown by `cd project_2_rekognition && ../node_modules/.bin/serverless info
+--verbose` (stack output `MediaBucketName`); the account ID alone by `aws sts get-caller-identity`. Results:
+DynamoDB console → `rekognitionAnalyzeDB-dev` → *Explore table items*. An image item looks like
+`{id, mediaType: "Image", mediaName, mediaBucket, createdAt, Labels: [{Name: "Cat", Confidence: 99.5,
+Instances, Parents, ...}], LabelModelVersion}`. A video item has `VideoMetadata` (duration, frame
+rate) and one entry per label: `{Name: "Dog", Confidence: 95.5, Occurrences: 3, FirstSeenMs: 0,
+LastSeenMs: 2000}`. Logs: `cd project_2_rekognition && ../node_modules/.bin/serverless logs -f
+startProcessingMedia` (or `handleLabelDetection`).
+
+Changes compared with the lecture code:
+
+| Lecture | Here |
+|---|---|
+| a video's labels saved as they come: one entry per label **per moment**, with bounding boxes | `summarize_video_labels()`: one entry per label name (highest confidence, occurrences, first / last time). The raw list easily goes over DynamoDB's **400 KB item limit**, and then `put_item` fails |
+| floats saved as strings (`"99.5"`) | `Decimal`, so they stay numbers in DynamoDB |
+| extension taken from the still URL-encoded key, upper case (`.JPG`) ignored, `.jpg` not handled | key decoded first, extension lower-cased, `.jpg` added (trigger and code) |
+| a failed video job crashes the second function | only `SUCCEEDED` jobs are read, other statuses are logged |
+| the last page's `NextToken` saved in the item | removed |
+| LabRole ARN and a hand-picked global bucket name in `configuration.json` | `${aws:accountId}` in the role ARN and the bucket name |
+| SNS topic `willNotifyWhenRekognitionDone` | `AmazonRekognition-rekognition-dev`: Rekognition's service-role policy only allows topics starting with `AmazonRekognition` |
+| `python3.9`, `uuid1`, a new client for every call | `python3.12`, `uuid4`, clients created once per container |
+
+**The anti-pattern from the lecture** (recursive, "run-away" Lambda functions): a function that
+writes into the same bucket that triggers it calls itself again for its own output, in an endless
+loop. Here nothing is ever written back to the bucket, only to DynamoDB, so an upload runs the
+function exactly once. (The Lecture 5 functions above avoid it differently: `detect` only triggers
+on image suffixes and saves `.json`, `organize` skips keys that are already in a folder.)
+
+To remove it, empty the bucket first (CloudFormation can't delete a bucket with files in it):
+
+```bash
+aws s3 rm s3://rekognition-media-<account-id>-dev --recursive
+cd serverless && npm run remove:rekognition
+```
+
 ### Inspirational quotes
 
 `quotes.py` calls `https://api.quotable.kurokeita.dev/api/quotes/random` with `requests` (with the
@@ -1340,6 +1550,17 @@ What is covered:
 - `quote` command: `--inspire` with and without an author (no AWS call without `--save`),
   `--save` with the default and a custom key, and requiring `--inspire`, a bucket for `--save`
   and an existing bucket (checked before calling the API)
+- Lecture 6 form functions (`serverless/project_1_form/handler.py`, loaded from its file with a fake
+  DynamoDB client): a valid form saved with every field as `S` and the table from `DYNAMO_DB_TABLE`,
+  values trimmed, the CORS header on every answer, missing / empty / non-text fields → 400 with their
+  names and nothing saved, a body that is not a JSON object → 400, a base64 body decoded, a DynamoDB
+  error → 500, `GET /` returning the page with the API URL written in and `form.js` inlined, and the
+  page, `form.js` and the handler using the same field names
+- Lecture 6 Rekognition functions (`serverless/project_2_rekognition/handler.py`, fake Rekognition
+  and DynamoDB): the decoded key sent to `DetectLabels` and saved as an `Image` item with `Decimal`
+  confidences, `.JPG` processed, `.mp4` starting a job with the SNS topic and role, other files
+  skipped, a finished video job read page by page (`NextToken`) and saved as a summary, a failed job
+  not saved, `make_item()` on nested data, and the summary's order
 
 I also tested all commands manually against a real AWS account.
 
@@ -1358,6 +1579,10 @@ I also tested all commands manually against a real AWS account.
 - CloudFront in front of the website bucket for HTTPS and a custom domain
 - drawing the detected boxes onto the image (Pillow) and saving it next to the JSON
 - the API key in AWS Secrets Manager instead of a Lambda environment variable
+- Lecture 6 form: an HTTP API (API Gateway v2) instead of the REST API (cheaper, simpler CORS), and
+  a `GET /submissions` route to read the saved forms
+- Lecture 6 Rekognition: text (`DetectText`) and face (`DetectFaces`) detection next to the labels,
+  and a dead-letter queue for uploads the function could not process
 
 ## Troubleshooting
 
@@ -1407,6 +1632,35 @@ fire (S3 console → the bucket → *Properties* → *Event notifications*).
 Only files in the bucket root are moved (`notes/a.txt` stays), and files without an extension only
 with `--unknown`. Otherwise check the logs: Lambda console → `organize-by-extension` → *Monitor* →
 *View CloudWatch logs*.
+
+**`serverless` asks to log in, or says the Serverless Framework V.4 needs a license.**
+A global or `npx` serverless installed v4. Use the npm scripts in `serverless/` (`npm run
+deploy:form`), which run the local v3 from `serverless/node_modules`, or call
+`../node_modules/.bin/serverless` from a project folder.
+
+**`npm run deploy:*` fails with `The security token included in the request is expired`.**
+AWS Academy keys only last for the lab session. Start the lab again and copy the new keys from
+*AWS Details* → *AWS CLI* into `~/.aws/credentials`.
+
+**`npm run deploy:form` fails with `serverlessFORM-prod already exists`.**
+A table with that name was created before by hand (the lecture's way). Delete it in the DynamoDB
+console, or deploy a second copy with `npm run deploy:form -- --stage dev`.
+
+**The form says `Error: Failed to fetch` or `set FORM_API_URL in js/config.js`.**
+The page was not opened from the API's `GET /` URL, so it doesn't know where to post. Put the POST
+endpoint into `serverless/project_1_form/static-web/js/config.js`, or open the `GET` URL from the
+deploy output instead.
+
+**`npm run remove:rekognition` fails with `The bucket you tried to delete is not empty`.**
+CloudFormation doesn't delete files. Run `aws s3 rm s3://rekognition-media-<account-id>-dev
+--recursive` first, then remove again.
+
+**Images get labels, but a video never shows up in DynamoDB.**
+Check `startProcessingMedia`'s logs (`serverless logs -f startProcessingMedia`). An
+`AccessDeniedException` for `StartLabelDetection` means Rekognition can't use LabRole to publish to
+SNS (the role must trust `rekognition.amazonaws.com`); then video analysis is not possible in that
+account. If the job started, check `handleLabelDetection`'s logs: a `FAILED` status usually means the
+file is not a real H.264 `.mp4`.
 
 **`https://` does not work for the website.**
 The S3 website endpoint is HTTP only. Use `http://`, or put CloudFront in front of it.

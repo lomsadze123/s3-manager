@@ -1,0 +1,14 @@
+{
+  "resource": "/",
+  "path": "/",
+  "httpMethod": "GET",
+  "headers": {},
+  "requestContext": {
+    "domainName": "abc123.execute-api.us-east-1.amazonaws.com",
+    "stage": "prod",
+    "httpMethod": "GET",
+    "path": "/prod/"
+  },
+  "body": null,
+  "isBase64Encoded": false
+}

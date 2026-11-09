@@ -14,8 +14,11 @@ __pycache__/
 # Build output (also static_web_page/react-app/dist/)
 dist/
 
-# Node packages of the React demo (recreate with `npm install`)
+# Node packages of the React demo and serverless/ (recreate with `npm install`)
 node_modules/
+
+# Serverless Framework build output (serverless/*/.serverless/)
+.serverless/
 
 # Editor / OS files
 .vscode/

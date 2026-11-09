@@ -1,0 +1,16 @@
+{
+  "resource": "/",
+  "path": "/",
+  "httpMethod": "POST",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "requestContext": {
+    "domainName": "abc123.execute-api.us-east-1.amazonaws.com",
+    "stage": "prod",
+    "httpMethod": "POST",
+    "path": "/prod/"
+  },
+  "body": "{\"name\": \"Beka Lomsadze\", \"email\": \"beka@example.com\", \"phone\": \"+995 555 00 00 00\", \"address\": \"Tbilisi, Georgia\", \"programming_languages\": \"Python, JavaScript\", \"tools\": \"AWS, Docker, Serverless Framework\"}",
+  "isBase64Encoded": false
+}

@@ -1,0 +1,72 @@
+# Lecture 6, Project 1: a server-less form.
+#   browser -> API Gateway (REST API "SubmitFormAPI") -> Lambda -> DynamoDB
+#
+# One `serverless deploy` creates everything: the Lambda functions, the API Gateway
+# (GET / shows the form, POST / saves it, CORS on) and the DynamoDB table.
+# In the lecture the table and the API were created by hand in the AWS console.
+#
+# Deploy:  cd serverless && npm install && npm run deploy:form
+# Remove:  npm run remove:form   (deletes the table and its items too)
+
+service: serverless-form
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'prod'}
+  apiName: SubmitFormAPI
+  memorySize: 128
+  timeout: 10
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    DYNAMO_DB_TABLE: ${self:custom.tableName}
+
+custom:
+  tableName: serverlessFORM-${sls:stage}
+
+package:
+  patterns:
+    - "!**"
+    - handler.py
+    - static-web/**
+
+functions:
+  serverlessForm:
+    handler: handler.lambda_handler
+    events:
+      - http:
+          path: /
+          method: post
+          cors: true
+
+  showForm:
+    handler: handler.show_form
+    events:
+      - http:
+          path: /
+          method: get
+
+resources:
+  Resources:
+    FormTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tableName}
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+
+  Outputs:
+    FormTableName:
+      Description: DynamoDB table with the submitted forms
+      Value: !Ref FormTable

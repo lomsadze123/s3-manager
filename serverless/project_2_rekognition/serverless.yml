@@ -1,0 +1,105 @@
+# Lecture 6, Project 2: analyse images and videos with AWS Rekognition.
+#
+#   image (.jpeg .jpg .png) -> S3 -> startProcessingMedia -> Rekognition DetectLabels -> DynamoDB
+#   video (.mp4)            -> S3 -> startProcessingMedia -> Rekognition StartLabelDetection
+#                              ... Rekognition finishes -> SNS -> handleLabelDetection -> DynamoDB
+#
+# One `serverless deploy` creates the bucket, both functions, the SNS topic and the DynamoDB table.
+# The functions never write back to the bucket, so an upload can't trigger them again
+# (the "recursive Lambda" anti-pattern from the lecture).
+#
+# Deploy:  cd serverless && npm install && npm run deploy:rekognition
+# Remove:  empty the bucket first, then npm run remove:rekognition
+
+service: rekognition
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 30
+  iam:
+    role: ${self:custom.labRole}
+  environment:
+    DYNAMO_DB_TABLE: ${self:custom.tableName}
+    REKOGNITION_SNS_TOPIC_ARN: ${self:custom.rekognitionSNSTopicArn}
+    REKOGNITION_ROLE_ARN: ${self:custom.labRole}
+
+custom:
+  labRole: arn:aws:iam::${aws:accountId}:role/LabRole
+  tableName: rekognitionAnalyzeDB-${sls:stage}
+  mediaBucket: rekognition-media-${aws:accountId}-${sls:stage}
+  topicName: AmazonRekognition-${self:service}-${sls:stage}
+  rekognitionSNSTopicArn:
+    Fn::Join:
+      - ":"
+      - - arn
+        - aws
+        - sns
+        - Ref: AWS::Region
+        - Ref: AWS::AccountId
+        - ${self:custom.topicName}
+
+package:
+  patterns:
+    - "!**"
+    - handler.py
+
+functions:
+  startProcessingMedia:
+    handler: handler.start_processing_media
+    events:
+      - s3:
+          bucket: ${self:custom.mediaBucket}
+          event: s3:ObjectCreated:*
+          rules:
+            - suffix: .mp4
+      - s3:
+          bucket: ${self:custom.mediaBucket}
+          event: s3:ObjectCreated:*
+          rules:
+            - suffix: .jpeg
+      - s3:
+          bucket: ${self:custom.mediaBucket}
+          event: s3:ObjectCreated:*
+          rules:
+            - suffix: .jpg
+      - s3:
+          bucket: ${self:custom.mediaBucket}
+          event: s3:ObjectCreated:*
+          rules:
+            - suffix: .png
+
+  handleLabelDetection:
+    handler: handler.handle_label_detection
+    timeout: 60
+    events:
+      - sns: ${self:custom.topicName}
+
+resources:
+  Resources:
+    LabelsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tableName}
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+
+  Outputs:
+    MediaBucketName:
+      Description: Upload .jpeg / .jpg / .png / .mp4 files here
+      Value: ${self:custom.mediaBucket}
+    LabelsTableName:
+      Description: DynamoDB table with the Rekognition labels
+      Value: !Ref LabelsTable
