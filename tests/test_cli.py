@@ -856,6 +856,134 @@ def test_organize_delete_removes_trigger_and_function(client):
     assert "Lambda function 'organize-by-extension' deleted." in result.output
 
 
+# ---------- analyze ----------
+
+ANALYSIS_RESULTS = {
+    "classification": {"error": "Not found", "status": 404},
+    "objectdetection": [{"label": "cat", "confidence": "0.97"}],
+    "celebrity": [],
+    "ocr": [{"text": "HELLO"}],
+}
+
+
+def test_analyze_deploy_needs_api_key(client, settings):
+    settings.clear()
+
+    result = runner.invoke(cli.app, ["analyze", "deploy", "my-images"])
+
+    assert result.exit_code == 1
+    assert "Set API_NINJAS_KEY in .env first" in result.output
+    client.create_function.assert_not_called()
+
+
+def test_analyze_deploy_rejects_unknown_api_type(client, settings):
+    result = runner.invoke(cli.app, ["analyze", "deploy", "my-images", "--apis", "ocr,faces"])
+
+    assert result.exit_code == 1
+    assert "Unknown API type 'faces'" in result.output
+    client.create_function.assert_not_called()
+
+
+def test_analyze_deploy_creates_function_and_trigger(client, settings):
+    client.get_bucket_location.return_value = {"LocationConstraint": "eu-central-1"}
+    client.get_caller_identity.return_value = {"Account": "123456789012"}
+    client.get_function.side_effect = make_client_error("ResourceNotFoundException")
+    client.create_function.return_value = {"FunctionArn": "arn:aws:lambda:eu-central-1:1:function:image-analysis"}
+    client.get_bucket_notification_configuration.return_value = {}
+
+    result = runner.invoke(cli.app, ["analyze", "deploy", "my-images"])
+
+    assert result.exit_code == 0
+    assert "Lambda function 'image-analysis' created in eu-central-1." in result.output
+    assert "classification, objectdetection, celebrity, ocr" in result.output
+    assert "s3://my-images/json/{api_type}_{image_name}.json" in result.output
+    assert client.create_function.call_args.kwargs["Environment"] == {
+        "Variables": {"API_NINJAS_KEY": "test-key", "API_TYPES": "classification,objectdetection,celebrity,ocr"}
+    }
+    client.put_bucket_notification_configuration.assert_called_once()
+
+
+def test_analyze_deploy_refuses_detection_bucket(client, settings):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    client.get_bucket_notification_configuration.return_value = {
+        "LambdaFunctionConfigurations": [{"Id": "object-detection-jpg"}]
+    }
+
+    result = runner.invoke(cli.app, ["analyze", "deploy", "my-images"])
+
+    assert result.exit_code == 1
+    assert "already runs the object detection function" in result.output
+    client.create_function.assert_not_called()
+
+
+def test_analyze_deploy_reports_missing_result_bucket(client, settings):
+    client.head_bucket.side_effect = [None, make_client_error("404")]
+
+    result = runner.invoke(cli.app, ["analyze", "deploy", "my-images", "--result-bucket", "missing"])
+
+    assert result.exit_code == 1
+    assert "Bucket 'missing' does not exist." in result.output
+
+
+def test_analyze_image_prints_and_saves_results(client, tmp_path, monkeypatch):
+    photo = tmp_path / "sample.jpg"
+    photo.write_bytes(b"fake")
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    client.get_function_configuration.return_value = {"Environment": {"Variables": {"API_TYPES": "ocr"}}}
+    calls = []
+
+    def fake_analyze(client, path, bucket, api_types, **kwargs):
+        calls.append((bucket, api_types, kwargs["result_bucket"]))
+        return "sample.jpg", ANALYSIS_RESULTS
+
+    monkeypatch.setattr(cli.analysis, "analyze_image", fake_analyze)
+    output_dir = tmp_path / "results"
+
+    result = runner.invoke(cli.app, ["analyze", "image", "my-images", str(photo), "--output-dir", str(output_dir)])
+
+    assert result.exit_code == 0
+    assert calls == [("my-images", ["ocr"], None)]
+    assert "json/celebrity_sample.json" in result.output
+    assert f"{'classification':<16} error (404): Not found" in result.output
+    assert f"{'objectdetection':<16} cat 0.97" in result.output
+    assert f"{'celebrity':<16} nothing found" in result.output
+    assert f"{'ocr':<16} HELLO" in result.output
+    assert json.loads((output_dir / "json" / "ocr_sample.json").read_text()) == [{"text": "HELLO"}]
+
+
+def test_analyze_local_calls_apis_without_aws(client, settings, tmp_path, monkeypatch):
+    photo = tmp_path / "sample.jpg"
+    photo.write_bytes(b"fake")
+    calls = []
+    monkeypatch.setattr(
+        cli.analysis, "query_analysis_api", lambda *args: calls.append(args) or [{"label": "cat", "confidence": "0.5"}]
+    )
+
+    result = runner.invoke(cli.app, ["analyze", "local", str(photo), "--apis", "objectdetection,celebrity"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("objectdetection", b"fake", "sample.jpg", "test-key"),
+        ("celebrity", b"fake", "sample.jpg", "test-key"),
+    ]
+    assert f"{'objectdetection':<16} cat 0.50" in result.output
+    assert client.mock_calls == []
+
+
+def test_analyze_delete_removes_trigger_and_function(client):
+    client.get_bucket_location.return_value = {"LocationConstraint": None}
+    client.get_bucket_notification_configuration.return_value = {
+        "LambdaFunctionConfigurations": [{"Id": "image-analysis-jpg"}, {"Id": "object-detection-png"}]
+    }
+
+    result = runner.invoke(cli.app, ["analyze", "delete", "my-images", "-y"])
+
+    assert result.exit_code == 0
+    assert "Removed 1 trigger(s)" in result.output
+    assert "Lambda function 'image-analysis' deleted." in result.output
+    client.delete_function.assert_called_once_with(FunctionName="image-analysis")
+
+
 # ---------- quote ----------
 
 QUOTE = {

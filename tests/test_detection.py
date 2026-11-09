@@ -107,6 +107,22 @@ def test_set_detection_trigger_keeps_other_notifications(client):
     assert ".json" not in suffixes
 
 
+def test_set_detection_trigger_with_prefix_keeps_detection_triggers(client):
+    detect = {"Id": "object-detection-jpg", "LambdaFunctionArn": "arn:detect"}
+    client.get_bucket_notification_configuration.return_value = {
+        "LambdaFunctionConfigurations": [detect, {"Id": "image-analysis-jpg", "LambdaFunctionArn": "arn:old"}],
+    }
+
+    detection.set_detection_trigger(client, "my-photos", ARN, prefix="image-analysis-")
+
+    lambdas = client.put_bucket_notification_configuration.call_args.kwargs["NotificationConfiguration"][
+        "LambdaFunctionConfigurations"
+    ]
+    assert lambdas[0] == detect
+    assert [item["Id"] for item in lambdas[1:4]] == ["image-analysis-jpg", "image-analysis-jpeg", "image-analysis-png"]
+    assert "arn:old" not in [item["LambdaFunctionArn"] for item in lambdas]
+
+
 def test_remove_detection_trigger_counts_removed_configs(client):
     client.get_bucket_notification_configuration.return_value = {
         "LambdaFunctionConfigurations": [{"Id": "object-detection-jpg"}, {"Id": "object-detection-png"}, {"Id": "x"}]

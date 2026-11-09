@@ -2,7 +2,7 @@
 
 This module only handles user interaction (arguments, prompts, output).
 The actual AWS work is done in buckets.py, objects.py, policies.py, lifecycle.py, website.py,
-detection.py, organizer.py and quotes.py.
+detection.py, organizer.py, analysis.py and quotes.py.
 """
 
 import json
@@ -18,7 +18,7 @@ from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, ParamValidationError
 from typer.core import TyperCommand, TyperGroup
 
-from s3_manager import buckets, detection, lifecycle, objects, organizer, policies, quotes, website
+from s3_manager import analysis, buckets, detection, lifecycle, objects, organizer, policies, quotes, website
 from s3_manager.client import init_client, read_setting
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,11 @@ organize_app = typer.Typer(
     help="Move new files into a folder named after their extension with an AWS Lambda function.",
     no_args_is_help=True,
 )
+analyze_app = typer.Typer(
+    help="Analyse new images with an AWS Lambda function and four API Ninjas endpoints "
+    "(classification, object detection, celebrity, OCR); results go to json/{api_type}_{image_name}.json.",
+    no_args_is_help=True,
+)
 
 app.add_typer(bucket_app, name="bucket")
 app.add_typer(object_app, name="object")
@@ -87,6 +92,7 @@ app.add_typer(lifecycle_app, name="lifecycle")
 app.add_typer(host_app, name="host")
 app.add_typer(detect_app, name="detect")
 app.add_typer(organize_app, name="organize")
+app.add_typer(analyze_app, name="analyze")
 
 # Friendlier messages for common AWS error codes.
 AWS_ERROR_MESSAGES = {
@@ -1043,6 +1049,155 @@ def organize_delete(
     s3_client = init_client()
     region = buckets.get_bucket_region(s3_client, bucket)
     removed, deleted = organizer.remove_organizer(
+        s3_client, init_client(region=region, service="lambda"), bucket, function_name
+    )
+    typer.echo(f"Removed {removed} trigger(s) from '{bucket}'.")
+    if deleted:
+        typer.echo(f"Lambda function '{function_name}' deleted.")
+    else:
+        typer.echo(f"Lambda function '{function_name}' does not exist.")
+
+
+# ---------- analyze commands ----------
+
+APIS_HELP = f"Comma-separated API types to call: {', '.join(analysis.API_TYPES)}."
+
+
+def require_api_types(text):
+    """Return the API types of --apis, or stop with the list of known ones."""
+    try:
+        return analysis.parse_api_types(text)
+    except ValueError as error:
+        typer.echo(str(error))
+        raise typer.Exit(code=1)
+
+
+def print_analysis(results):
+    for api_type, result in results.items():
+        typer.echo(f"{api_type:<16} {analysis.summarize_result(api_type, result)}")
+
+
+def save_analysis(results, key, output_dir):
+    paths = analysis.save_results(results, key, output_dir)
+    typer.echo(f"Saved {len(paths)} file(s):")
+    for path in paths:
+        typer.echo(f"  {path}")
+
+
+@analyze_app.command("deploy")
+def analyze_deploy(
+    bucket: Annotated[str, typer.Argument(help="Bucket whose new images should be analysed.")],
+    apis: Annotated[str, typer.Option(help=APIS_HELP)] = analysis.DEFAULT_API_TYPES,
+    result_bucket: Annotated[
+        Optional[str], typer.Option(help="Save the JSON results into this bucket. Default: the same bucket.")
+    ] = None,
+    function_name: Annotated[
+        str, typer.Option("--function-name", help="Name of the Lambda function.")
+    ] = analysis.DEFAULT_FUNCTION_NAME,
+    role_arn: Annotated[
+        Optional[str],
+        typer.Option(help="IAM role of the function. Default: LAMBDA_ROLE_ARN from .env, else LabRole (AWS Academy)."),
+    ] = None,
+):
+    """Create (or update) the image analysis Lambda function in the bucket's region and call it for
+    every new .jpg / .jpeg / .png (s3:ObjectCreated:*). Each API answer is saved as
+    json/{api_type}_{image_name}.json. Use another bucket than 'detect deploy' / 'organize deploy'."""
+    api_key = require_api_key("api-ninjas")
+    api_types = require_api_types(apis)
+    s3_client = init_client()
+    for name in filter(None, (bucket, result_bucket)):
+        if not buckets.bucket_exists(s3_client, name):
+            typer.echo(f"Bucket '{name}' does not exist.")
+            raise typer.Exit(code=1)
+
+    region = buckets.get_bucket_region(s3_client, bucket)
+    try:
+        arn, created = analysis.deploy_image_analysis(
+            s3_client,
+            init_client(region=region, service="lambda"),
+            init_client(region=region, service="sts"),
+            bucket,
+            api_key,
+            api_types,
+            result_bucket=result_bucket,
+            role_arn=role_arn or read_setting("LAMBDA_ROLE_ARN"),
+            function_name=function_name,
+        )
+    except ValueError as error:
+        typer.echo(str(error))
+        raise typer.Exit(code=1)
+    typer.echo(f"Lambda function '{function_name}' {'created' if created else 'updated'} in {region}.")
+    typer.echo(f"  {arn}")
+    typer.echo(
+        f"New .jpg / .jpeg / .png files in '{bucket}' are now sent to: {', '.join(api_types)}. "
+        f"Results: s3://{result_bucket or bucket}/json/{{api_type}}_{{image_name}}.json"
+    )
+    typer.echo(f"Try it: s3-manager analyze image {bucket} sample.jpg")
+
+
+@analyze_app.command("image")
+def analyze_image(
+    bucket: Annotated[str, typer.Argument(help="Bucket connected with 'analyze deploy'.")],
+    path: Annotated[Path, typer.Argument(help="Local .jpg / .jpeg / .png image.", exists=True, dir_okay=False)],
+    key: Annotated[Optional[str], typer.Option(help="Object key in S3. Defaults to the file name.")] = None,
+    timeout: Annotated[int, typer.Option(help="Seconds to wait for each result.")] = 90,
+    output_dir: Annotated[
+        Optional[Path], typer.Option(help="Also save the JSON results here, e.g. results/json/ocr_sample.json.")
+    ] = None,
+    function_name: Annotated[
+        str, typer.Option("--function-name", help="Name of the Lambda function (its settings are read).")
+    ] = analysis.DEFAULT_FUNCTION_NAME,
+):
+    """Upload an image, wait until the Lambda function saved one JSON per API type, and show them."""
+    s3_client = init_client()
+    region = buckets.get_bucket_region(s3_client, bucket)
+    api_types, result_bucket = analysis.read_function_settings(
+        init_client(region=region, service="lambda"), function_name
+    )
+    key, results = analysis.analyze_image(
+        s3_client, path, bucket, api_types, key=key, result_bucket=result_bucket, timeout=timeout
+    )
+    typer.echo(f"Uploaded s3://{bucket}/{key}, results in s3://{result_bucket or bucket}/:")
+    for api_type in results:
+        typer.echo(f"  {analysis.result_key(api_type, key)}")
+    print_analysis(results)
+    if output_dir:
+        save_analysis(results, key, output_dir)
+
+
+@analyze_app.command("local")
+def analyze_local(
+    path: Annotated[Path, typer.Argument(help="Local .jpg / .png image.", exists=True, dir_okay=False)],
+    apis: Annotated[str, typer.Option(help=APIS_HELP)] = analysis.DEFAULT_API_TYPES,
+    output_dir: Annotated[
+        Optional[Path], typer.Option(help="Also save the JSON results here, e.g. results/json/ocr_sample.json.")
+    ] = None,
+):
+    """Send an image straight to the API Ninjas endpoints, without AWS. Good for testing the API key."""
+    api_key = require_api_key("api-ninjas")
+    api_types = require_api_types(apis)
+    results = analysis.analyze_local(path, api_types, api_key)
+    print_analysis(results)
+    if output_dir:
+        save_analysis(results, path.name, output_dir)
+
+
+@analyze_app.command("delete")
+def analyze_delete(
+    bucket: Annotated[str, typer.Argument(help="Bucket connected with 'analyze deploy'.")],
+    function_name: Annotated[
+        str, typer.Option("--function-name", help="Name of the Lambda function.")
+    ] = analysis.DEFAULT_FUNCTION_NAME,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+):
+    """Remove the image triggers from the bucket and delete the Lambda function.
+    The images and json/ results stay in the bucket."""
+    if not yes:
+        typer.confirm(f"Delete Lambda function '{function_name}' and its triggers on '{bucket}'?", abort=True)
+
+    s3_client = init_client()
+    region = buckets.get_bucket_region(s3_client, bucket)
+    removed, deleted = analysis.remove_image_analysis(
         s3_client, init_client(region=region, service="lambda"), bucket, function_name
     )
     typer.echo(f"Removed {removed} trigger(s) from '{bucket}'.")

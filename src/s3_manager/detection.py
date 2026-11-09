@@ -90,18 +90,20 @@ def deploy_detection_lambda(
     environment=None,
     handler=LAMBDA_HANDLER,
     description="Detects objects on images uploaded to S3 (s3-manager).",
+    timeout=LAMBDA_TIMEOUT,
 ):
     """Create the Lambda function, or update its code and settings if it exists.
 
     Returns (function ARN, True if it was created). Waits until the function is ready, because
     Lambda refuses changes while a create or update is still in progress.
-    handler and description let other functions (organizer.py) be deployed the same way.
+    handler, description and timeout let other functions (organizer.py, analysis.py) be deployed
+    the same way.
     """
     settings = {
         "Role": role_arn,
         "Runtime": LAMBDA_RUNTIME,
         "Handler": handler,
-        "Timeout": LAMBDA_TIMEOUT,
+        "Timeout": timeout,
         "MemorySize": LAMBDA_MEMORY,
         "Environment": {"Variables": environment or {}},
     }
@@ -152,24 +154,25 @@ def read_notification_configuration(client, bucket):
     return {key: response[key] for key in NOTIFICATION_KEYS if key in response}
 
 
-def without_detection_triggers(configuration):
+def without_detection_triggers(configuration, prefix=TRIGGER_ID_PREFIX):
     lambdas = configuration.get("LambdaFunctionConfigurations", [])
-    return [item for item in lambdas if not item.get("Id", "").startswith(TRIGGER_ID_PREFIX)]
+    return [item for item in lambdas if not item.get("Id", "").startswith(prefix)]
 
 
-def set_detection_trigger(client, bucket, function_arn):
+def set_detection_trigger(client, bucket, function_arn, prefix=TRIGGER_ID_PREFIX):
     """Call the function for every new image in the bucket.
 
     One configuration per extension, because a filter can only have one suffix. Only images
     trigger it, so the .json results it writes into the same bucket never call it again.
     Other notifications of the bucket are kept (put_bucket_notification_configuration replaces all).
+    prefix starts the configuration ids, so another image function (analysis.py) can reuse this.
     """
     configuration = read_notification_configuration(client, bucket)
-    lambdas = without_detection_triggers(configuration)
+    lambdas = without_detection_triggers(configuration, prefix)
     for extension in TRIGGER_EXTENSIONS:
         lambdas.append(
             {
-                "Id": f"{TRIGGER_ID_PREFIX}{extension[1:]}",
+                "Id": f"{prefix}{extension[1:]}",
                 "LambdaFunctionArn": function_arn,
                 "Events": ["s3:ObjectCreated:*"],
                 "Filter": {"Key": {"FilterRules": [{"Name": "suffix", "Value": extension}]}},
@@ -180,10 +183,10 @@ def set_detection_trigger(client, bucket, function_arn):
     client.put_bucket_notification_configuration(Bucket=bucket, NotificationConfiguration=configuration)
 
 
-def remove_detection_trigger(client, bucket):
+def remove_detection_trigger(client, bucket, prefix=TRIGGER_ID_PREFIX):
     """Remove the triggers added by set_detection_trigger. Returns how many were removed."""
     configuration = read_notification_configuration(client, bucket)
-    lambdas = without_detection_triggers(configuration)
+    lambdas = without_detection_triggers(configuration, prefix)
     removed = len(configuration.get("LambdaFunctionConfigurations", [])) - len(lambdas)
     if removed:
         configuration["LambdaFunctionConfigurations"] = lambdas

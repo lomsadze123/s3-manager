@@ -68,6 +68,16 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   function (role `LabRole`) that runs for every new file in the bucket and moves it into a folder
   named after its extension (`demo.csv` → `csv/demo.csv`), so files are sorted the moment they are
   uploaded. It is the automatic version of `bucket organize -ext`. `organize delete` removes it
+- **Image analysis with AWS Lambda and four API Ninjas endpoints:** `analyze deploy BUCKET` creates
+  a third Lambda function (the lecture's `lambda_1.py` with Hugging Face replaced by API Ninjas) that
+  runs on `s3:ObjectCreated:*` for every new image. It reads the image from S3 as bytes, sends it to
+  image classification, object detection, celebrity and text recognition (OCR), and saves each JSON
+  answer separately as `json/{api_type}_{image_name}.json` (`sample.jpg` →
+  `json/classification_sample.json`, `json/objectdetection_sample.json`, `json/celebrity_sample.json`,
+  `json/ocr_sample.json`). `--apis` picks the endpoints, `--result-bucket` saves into a designated
+  bucket. `analyze image` uploads an image and prints a summary of each answer (`--output-dir`
+  saves the JSON files locally), `analyze local` calls the APIs without AWS, `analyze delete`
+  removes it (see [Image analysis with AWS Lambda](#image-analysis-with-aws-lambda))
 - **Running the lecture's Lambda from the AWS console:** step-by-step instructions and sample test
   events in `aws_lambda/events/` (see [Running a Lambda function from the AWS console](#running-a-lambda-function-from-the-aws-console))
 - **Inspirational quotes:** `quote --inspire` prints a random quote from the
@@ -91,8 +101,10 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
 | [requests](https://requests.readthedocs.io/) | downloads files from URLs |
 | [python-magic](https://github.com/ahupp/python-magic) | detects the real file type of downloads and `--by-type` uploads (wrapper around the `libmagic` C library) |
 | `logging` (standard library) | operation logs |
-| [AWS Lambda](https://docs.aws.amazon.com/lambda/) + [urllib3](https://urllib3.readthedocs.io/) | the object detection function (`aws_lambda/object_detection.py`) and the organize-by-extension function (`aws_lambda/organize_by_extension.py`); urllib3 is already in the Lambda runtime, so no layer is needed |
+| [AWS Lambda](https://docs.aws.amazon.com/lambda/) + [urllib3](https://urllib3.readthedocs.io/) | the object detection function (`aws_lambda/object_detection.py`), the organize-by-extension function (`aws_lambda/organize_by_extension.py`) and the image analysis function (`aws_lambda/image_analysis.py`); urllib3 is already in the Lambda runtime, so no layer is needed |
 | [API Ninjas Object Detection](https://api-ninjas.com/api/objectdetection) | free object detection API (no bank card); Hugging Face `facebook/detr-resnet-50` as an option |
+| API Ninjas [Object Detection](https://api-ninjas.com/api/objectdetection), [Image to Text](https://api-ninjas.com/api/imagetotext), [Celebrity](https://api-ninjas.com/api/celebrity), Image Classification (`/v1/imageclassification`) | the four endpoints of the image analysis function (`analyze`), same free key |
+| `concurrent.futures` (standard library) | the image analysis function calls the four endpoints in parallel |
 | [pytest](https://docs.pytest.org/) | unit tests |
 | [Node.js](https://nodejs.org/) + [Vite](https://vite.dev/) + [React](https://react.dev/) | only for building the React demo site in `static_web_page/react-app/` |
 
@@ -135,7 +147,7 @@ cp .env.example .env
 | `AWS_SESSION_TOKEN` | no | Only for temporary credentials (e.g. AWS Academy / Learner Lab). Leave empty for IAM user keys. |
 | `AWS_REGION` | no | Region for new buckets, e.g. `eu-central-1` (default: `us-east-1`) |
 | `S3_ENDPOINT_URL` | no | Endpoint of an S3-compatible service, e.g. `http://localhost:9000` for MinIO. Leave empty for AWS. |
-| `API_NINJAS_KEY` | for `detect` | Key from [api-ninjas.com](https://api-ninjas.com) (free, no bank card). `detect deploy` copies it into the Lambda function's environment variables. |
+| `API_NINJAS_KEY` | for `detect` and `analyze` | Key from [api-ninjas.com](https://api-ninjas.com) (free, no bank card). `detect deploy` / `analyze deploy` copy it into the Lambda function's environment variables. |
 | `HF_API_TOKEN` | no | Hugging Face token, only for `detect ... --provider huggingface` |
 | `LAMBDA_ROLE_ARN` | no | IAM role of the Lambda function. Empty: the account's `LabRole` (AWS Academy), or pass `--role-arn` |
 
@@ -253,6 +265,18 @@ poetry run s3-manager organize deploy beka-organize-2026      # function + permi
 poetry run s3-manager object upload ./demo.csv beka-organize-2026
 poetry run s3-manager object list beka-organize-2026          # a few seconds later: csv/demo.csv
 poetry run s3-manager organize delete beka-organize-2026      # trigger + function removed
+
+# 10c. image analysis with Lambda: 4 API Ninjas endpoints (a different bucket again!)
+poetry run s3-manager analyze local ./sample.jpg              # test the key and the 4 endpoints, no AWS
+poetry run s3-manager bucket create beka-analyze-2026
+poetry run s3-manager analyze deploy beka-analyze-2026        # function + permission + trigger
+poetry run s3-manager analyze image beka-analyze-2026 ./sample.jpg --output-dir results
+#   -> s3://beka-analyze-2026/json/classification_sample.json, objectdetection_sample.json,
+#      celebrity_sample.json, ocr_sample.json (and the same files in results/json/)
+poetry run s3-manager object list beka-analyze-2026 --prefix json/
+poetry run s3-manager analyze image beka-analyze-2026 ./michael_jordan.jpg   # celebrity: name from the file name
+poetry run s3-manager analyze deploy beka-analyze-2026 --apis objectdetection,ocr --result-bucket beka-results-2026
+poetry run s3-manager analyze delete beka-analyze-2026        # trigger + function removed
 
 # 11. inspirational quotes (see "Inspirational quotes" below)
 poetry run s3-manager quote --inspire                         # random quote, no AWS needed
@@ -412,6 +436,10 @@ command: `s3-manager -v bucket list`.
 | `detect delete BUCKET [--function-name ...] [-y]` | Remove the image triggers from the bucket and delete the function. Images and results stay. |
 | `organize deploy BUCKET [--function-name organize-by-extension] [--role-arn ARN] [--unknown]` | Create (or update) the organize Lambda function in the bucket's region, allow S3 to call it, and call it for every new object in the bucket. New root-level files are moved to `<extension>/<name>`; with `--unknown` files without an extension go to `unknown/`. Refuses a bucket that has the detection trigger (exit code `1`). |
 | `organize delete BUCKET [--function-name ...] [-y]` | Remove the trigger from the bucket and delete the function. Moved files stay where they are. |
+| `analyze deploy BUCKET [--apis classification,objectdetection,celebrity,ocr] [--result-bucket B] [--function-name image-analysis] [--role-arn ARN]` | Create (or update) the image analysis Lambda function in the bucket's region (timeout 60 s) with the API key from `.env`, allow S3 to call it, and call it for every new `.jpg` / `.jpeg` / `.png` (`s3:ObjectCreated:*`). Each API answer is saved as `json/{api_type}_{image_name}.json` in the same bucket or in `--result-bucket`. `--apis` chooses the endpoints. Refuses a bucket that has the detect or organize trigger (exit code `1`). |
+| `analyze image BUCKET FILE [--key K] [--timeout 90] [--output-dir DIR] [--function-name ...]` | Read the API types and result bucket from the deployed function, upload the image (type checked with python-magic), wait for every `json/..._<name>.json` and print one summary line per API (labels with confidence, OCR text, celebrity names, or the error). `--output-dir` also saves the JSON files locally (`DIR/json/ocr_sample.json`, ...). |
+| `analyze local FILE [--apis ...] [--output-dir DIR]` | Send an image straight to the API Ninjas endpoints, without AWS (to test the key and see which endpoints answer) |
+| `analyze delete BUCKET [--function-name ...] [-y]` | Remove the image analysis triggers from the bucket and delete the function. Images and `json/` results stay. |
 | `quote [BUCKET] --inspire [AUTHOR] [--save] [--key KEY]` | `--inspire`: print a random quote; `--inspire "AUTHOR"`: a random quote by that author (full name or slug, exit code `1` if the API has none). `--save`: also save the quote as JSON in BUCKET, under `quotes/<author-slug>/<id>.json` or `--key` (`.json` is added if missing). BUCKET goes before `--inspire`. Without `--inspire`: show a hint (exit code `1`). |
 
 Every command has its own help, e.g. `poetry run s3-manager object upload --help`.
@@ -560,6 +588,24 @@ an S3 object into a folder corresponding to its file extension", role `LabRole`)
 | `deploy_organizer()`, `set_organize_trigger()` | `organizer.py` | `organize deploy` (reuses `build_lambda_zip()`, `deploy_detection_lambda()`, `allow_s3_invoke()` from `detection.py`) |
 | `remove_organizer()` | `organizer.py` | `organize delete` |
 
+Added for the Lambda + API Ninjas assignment ("adapt the AWS Lambda lecture, replacing the Hugging
+Face integration with API Ninjas; on `s3:ObjectCreated:*` read the image as a byte stream, send it
+to image classification, object detection, celebrity recognition and OCR, save each JSON as
+`json/{api_type}_{image_name}.json`"). The function is in `aws_lambda/image_analysis.py`:
+
+| Function | Module | Used by |
+|---|---|---|
+| `lambda_handler()` | `aws_lambda/image_analysis.py` | Lambda, for every new image in the bucket |
+| `read_image()` | `aws_lambda/image_analysis.py` | the handler: `download_fileobj` into a `BytesIO` (the image as a byte stream, like the lecture) |
+| `query_api_ninjas()` | `aws_lambda/image_analysis.py` | POST the image to classification, object detection and OCR (the lecture's function, now with the URL as argument) |
+| `query_celebrity()`, `celebrity_name()` | `aws_lambda/image_analysis.py` | the celebrity API, searched with the name from the file name |
+| `query_api()`, `analyze_image()` | `aws_lambda/image_analysis.py` | call every API type from `API_TYPES`, in parallel |
+| `result_key()`, `save_result()` | `aws_lambda/image_analysis.py` | `json/{api_type}_{image_name}.json` in the bucket or `RESULT_BUCKET` |
+| `deploy_image_analysis()`, `check_free_bucket()` | `analysis.py` | `analyze deploy` (reuses `build_lambda_zip()`, `deploy_detection_lambda()`, `allow_s3_invoke()`, `set_detection_trigger()` from `detection.py`) |
+| `read_function_settings()`, `analyze_image()`, `summarize_result()`, `save_results()` | `analysis.py` | `analyze image` |
+| `query_analysis_api()`, `analyze_local()` | `analysis.py` | `analyze local` |
+| `remove_image_analysis()` | `analysis.py` | `analyze delete` |
+
 Added for the lecture 5 "inspire" script (`main.py` with `get_quote()` and `print_quote()`, turned
 into the `quote` command with `--inspire` and `--save`):
 
@@ -634,12 +680,16 @@ s3-manager/
 │   ├── detection.py   # build_lambda_zip, deploy_detection_lambda, allow_s3_invoke,
 │   │                  # set_detection_trigger, wait_for_result, normalize_detections, ...
 │   ├── organizer.py   # deploy_organizer, set_organize_trigger, remove_organizer
+│   ├── analysis.py    # deploy_image_analysis, read_function_settings, analyze_image,
+│   │                  # query_analysis_api, summarize_result, remove_image_analysis, ...
 │   └── quotes.py      # get_quote, format_quote, quote_key, save_quote
 ├── aws_lambda/
 │   ├── object_detection.py  # the Lambda function: lambda_handler, query_image, query_api_ninjas,
 │   │                        # query_huggingface (deployed on its own, so no s3_manager imports)
 │   ├── organize_by_extension.py  # the Lambda function: lambda_handler, extension_folder, move_object
-│   └── events/              # sample S3 events for the Lambda console's Test tab
+│   ├── image_analysis.py    # the Lambda function: lambda_handler, read_image, query_api_ninjas,
+│   │                        # query_celebrity, analyze_image, result_key, save_result
+│   └── events/              # sample S3 events for the Lambda console's Test tab (s3_put_sample.json)
 ├── static_web_page/
 │   ├── index.html     # the simple site: a page with my first and last name
 │   ├── error.html     # custom 404 page for --error-document
@@ -1012,6 +1062,82 @@ overlaps with everything. Even without that rule, the organizer would move the `
 `json/` and every moved image would be detected again. So `organize deploy` checks the bucket first
 and stops with a message if `detect deploy` was used on it.
 
+### Image analysis with AWS Lambda
+
+```text
+upload sample.jpg ──> S3 bucket ──"s3:ObjectCreated:*" (.jpg/.jpeg/.png)──> Lambda: image_analysis.py
+                         ^                                                   │ read_image(): the image as bytes
+                         │                                                   │ in parallel (ThreadPoolExecutor):
+                         │                                                   ├─ POST /v1/imageclassification
+                         │                                                   ├─ POST /v1/objectdetection
+                         │                                                   ├─ GET  /v1/celebrity?name=sample
+                         │                                                   └─ POST /v1/imagetotext
+                         └──── put_object json/{api_type}_sample.json (x4) <─┘
+```
+
+This is the lecture's `lambda_1.py`, adapted for the assignment: the Hugging Face provider is gone,
+and instead of one call to object detection the image goes to four API Ninjas endpoints (same free
+key, header `X-Api-Key`). Each answer is saved separately:
+
+| API type | Endpoint | Request | Saved as (for `sample.jpg`) |
+|---|---|---|---|
+| `classification` | `https://api.api-ninjas.com/v1/imageclassification` | POST, multipart field `image` | `json/classification_sample.json` |
+| `objectdetection` | `https://api.api-ninjas.com/v1/objectdetection` | POST, multipart field `image` | `json/objectdetection_sample.json` |
+| `celebrity` | `https://api.api-ninjas.com/v1/celebrity` | GET `?name=` from the file name | `json/celebrity_sample.json` |
+| `ocr` | `https://api.api-ninjas.com/v1/imagetotext` | POST, multipart field `image` | `json/ocr_sample.json` |
+
+**Two endpoints don't work the way the assignment assumes**, and I checked their docs:
+
+- **Celebrity** has no image input. It is a search by `name` (and net worth, height, nationality),
+  so the function can't recognise a face. It uses the image's file name as the name instead:
+  `michael_jordan.jpg` → `GET /v1/celebrity?name=michael jordan` (`_`, `-` and spaces become one
+  space). For `sample.jpg` the answer is `[]` (no celebrity called "sample"), which is still saved,
+  so `json/celebrity_sample.json` always exists.
+- **Image Classification** has no documentation page on api-ninjas.com any more (the page answers
+  404). The function still calls `/v1/imageclassification`; if the endpoint is gone, its file contains
+  the error, e.g. `{"error": "...", "status": 404}`. `analyze local sample.jpg` shows at once which
+  endpoints answer. `--apis` removes one without changing code.
+
+**Reading the image as a byte stream.** `read_image()` downloads the object with
+`download_fileobj` into an `io.BytesIO` (like the lecture) and returns its bytes, so it is read once
+and sent to every endpoint. The multipart field is `image` with the real file name, so urllib3 sends
+`Content-Type: image/jpeg` or `image/png`.
+
+**Naming.** `json/{api_type}_{image_name}.json`, where `image_name` is the file name without the
+extension. An image in a folder keeps the folder after `json/` (`holiday/cat.jpg` →
+`json/holiday/ocr_cat.json`), so two `cat.jpg` in different folders don't overwrite each other.
+
+**One error doesn't lose the other results.** A non-200 answer is saved as `{"error", "status"}`;
+an exception (timeout, an answer that is not JSON) is saved as `{"error": "TimeoutError: ..."}`, and
+the other three files are still written. A missing `API_NINJAS_KEY` gives an error file for each type
+without sending any request.
+
+**In parallel, timeout 60 s.** The four calls run at the same time in a `ThreadPoolExecutor`
+(urllib3's `PoolManager` is thread-safe), so the function takes about as long as the slowest API.
+Each request has a 20 s timeout and the function 60 s (`deploy_detection_lambda(timeout=60)`; the
+detect function keeps 30 s).
+
+**No endless loop.** The trigger is the same as for `detect`: `s3:ObjectCreated:*` with one suffix
+filter per image extension (`.jpg`, `.jpeg`, `.png` and upper case), ids `image-analysis-jpg`, ...
+The results are `.json`, so they never call the function again. The handler also skips images under
+`json/`.
+
+**Settings** (Lambda environment variables, set by `analyze deploy`): `API_NINJAS_KEY`,
+`API_TYPES` (`--apis`, default all four) and `RESULT_BUCKET` (`--result-bucket`, the "designated
+bucket" of the assignment; empty = the image's bucket). LabRole may write to any of your buckets; with
+your own role it needs `s3:PutObject` on the result bucket. `analyze image` reads `API_TYPES` and
+`RESULT_BUCKET` back from the function (`get_function_configuration`), so it waits for exactly the
+files the function writes.
+
+**Why another bucket again.** The trigger uses the same suffixes as `detect`, so S3 would refuse
+it (`Configurations overlap`), and the organizer's trigger has no filter at all. `analyze deploy`
+checks the bucket first and stops with a message if `detect deploy` or `organize deploy` was used
+on it.
+
+**Free tier limits.** Images must be JPEG or PNG; OCR takes at most 200 KB on the free plan,
+object detection less than 2000 × 2000 pixels. A bigger image gets an error file for that API
+only.
+
 ### Running a Lambda function from the AWS console
 
 The assignment's first part is to run the lecture's `lambda_1.py` from the console (the CLI's
@@ -1041,6 +1167,25 @@ suffix, and `aws_lambda/events/s3_put_csv.json`.
 
 For the submission: the image (`photo.jpg`) and the model's answer (`photo.json`, download it from
 the bucket, or use `detect image BUCKET photo.jpg --output photo.json`).
+
+The image analysis function works the same way from the console:
+
+1. *Create function* → name `image-analysis`, runtime *Python 3.13*, role **LabRole**.
+2. Paste `aws_lambda/image_analysis.py` into `lambda_function.py` and click *Deploy*
+   (handler `lambda_function.lambda_handler`).
+3. *Environment variables*: `API_NINJAS_KEY` = your key. Optional: `API_TYPES`
+   (e.g. `objectdetection,ocr`) and `RESULT_BUCKET`.
+4. *General configuration* → timeout **60 s**.
+5. *Add trigger* → S3 → your bucket, *All object create events* (`s3:ObjectCreated:*`), suffix
+   `.jpg`. Add a second trigger with `.png` if you want PNGs too.
+6. Upload `sample.jpg`. A few seconds later the bucket has `json/classification_sample.json`,
+   `json/objectdetection_sample.json`, `json/celebrity_sample.json` and `json/ocr_sample.json`.
+
+The *Test* tab works with `aws_lambda/events/s3_put_sample.json` (key `sample.jpg`; change the
+bucket name to yours and upload `sample.jpg` first).
+
+For the submission: the image and the four JSON files (`analyze image BUCKET sample.jpg
+--output-dir results` puts them into `results/json/`).
 
 ### Inspirational quotes
 
@@ -1177,6 +1322,17 @@ What is covered:
   `create_function`, the zip contains only the handler, the permission added before the trigger,
   and removing the trigger and function; `organize deploy` / `organize delete` output, a missing
   bucket, and `detect image --output` writing the model's answer to a file
+- image analysis function (`aws_lambda/image_analysis.py`, loaded from its file with a fake S3
+  client and HTTP pool): one `json/{api_type}_{name}.json` per API type with Content-Type, keys
+  decoded and folders kept, non-images and `json/` keys skipped, the image sent as multipart field
+  `image` with its file name, celebrity searched by the file name, a missing key saved as an error
+  without requests, one failing API (404 or exception) not stopping the others, `API_TYPES` and
+  `RESULT_BUCKET`
+- `analysis.py`: `--apis` parsing, the zip, deploy with handler, 60 s timeout, environment,
+  `image-analysis-*` trigger ids and the permission before the trigger, buckets with the detect or
+  organize trigger refused, removing only its own triggers, reading the function settings, old
+  results deleted before uploading, `requests` calls for `analyze local`, local files with the S3
+  names, and the one-line summaries; `analyze deploy / image / local / delete` output
 - quotes (`requests.get` patched): no `author` parameter for a random quote, the author sent as
   `params`, `{}` from the API turned into "No quotes found for author 'Linus Torvalds'", the
   lecture's output format, the default key `quotes/<slug>/<id>.json`, the JSON body and
@@ -1235,6 +1391,17 @@ accepts it.
 The bucket already has another event notification for new objects (for example one added in the
 console). A trigger without filter overlaps with every other `ObjectCreated` rule, so remove the
 other one (S3 console → the bucket → *Properties* → *Event notifications*) or use another bucket.
+
+**`analyze image` shows `error (404)` for classification (or another endpoint).**
+The function worked, but that API Ninjas endpoint answered with an error, and the error is what was
+saved. Check it without AWS: `analyze local sample.jpg`. `/v1/imageclassification` has no docs any
+more and may be gone; deploy without it with `analyze deploy BUCKET --apis objectdetection,celebrity,ocr`.
+`error (413)` or a size error for `ocr`: the free plan takes at most 200 KB, so use a smaller image.
+
+**`analyze image` says `No result ... after 90 seconds`.**
+Check the logs: Lambda console → `image-analysis` → *Monitor* → *View CloudWatch logs*. A
+`Task timed out` there means the APIs were slower than 60 s; no log at all means the trigger did not
+fire (S3 console → the bucket → *Properties* → *Event notifications*).
 
 **A file uploaded to the organize bucket is not moved.**
 Only files in the bucket root are moved (`notes/a.txt` stays), and files without an extension only
