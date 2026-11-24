@@ -97,6 +97,12 @@ with AWS S3 through boto3. I tried to keep the code simple and readable rather t
   that author, and `quote BUCKET --inspire "Nelson Mandela" --save` also saves the quote as a `.json`
   object in the bucket (`quotes/nelson-mandela/<id>.json`)
 - **Configuration** through a `.env` file (credentials are never stored in the code)
+- **VPC infrastructure (argparse script):** `python vpc_manager.py create --vpc-name my-vpc` creates
+  a VPC with a Name tag, an Internet Gateway attached to it, one public and one private subnet with
+  their own route tables, and a `0.0.0.0/0` route to the Internet Gateway in the public one. All
+  CIDR blocks are checked with `ipaddress` first. `python vpc_manager.py destroy --vpc-name my-vpc`
+  finds everything by name and deletes it in the order AWS requires (see
+  [VPC infrastructure with argparse](#vpc-infrastructure-with-argparse))
 - **Logging** of every operation, with a `--verbose` mode for debugging
 - **Readable errors** instead of Python tracebacks (e.g. `ERROR: The bucket does not exist. (NoSuchBucket)`)
 - Works with any S3-compatible service through an optional endpoint URL
@@ -762,6 +768,8 @@ s3-manager/
 │   ├── html_demo_site/  # source of github.com/do-community/html_demo_site (MIT) for main.py host
 │   └── react-app/     # the React demo (Vite): npm install && npm run build -> dist/
 ├── main.py            # python main.py ... runs the same CLI as the s3-manager command
+├── vpc_manager.py     # standalone argparse script: create / destroy a VPC with public + private subnet
+│                      # (validate_cidrs, create_infrastructure, destroy_infrastructure, ...)
 ├── tests/             # pytest unit tests for each module and the CLI (no AWS account needed)
 ├── .env.example       # template for the .env file
 ├── pyproject.toml     # project metadata and dependencies
@@ -1425,6 +1433,64 @@ then saves the whole `quote` object (text, author, tags) with `put_object` as pr
 with `Content-Type: application/json`. Without `--save` no AWS call is made, so plain `--inspire`
 works without credentials.
 
+### VPC infrastructure with argparse
+
+`vpc_manager.py` is a separate script, written with `argparse` instead of Typer because the
+assignment asks for it. It reuses `client.init_client(region, service="ec2")`, so the same `.env`
+credentials work (including `AWS_SESSION_TOKEN` for AWS Academy). The IAM user needs EC2/VPC
+permissions (e.g. `AmazonVPCFullAccess`).
+
+```bash
+# create (CIDRs are optional, these are the defaults)
+python vpc_manager.py create --vpc-name my-vpc --vpc-cidr 10.0.0.0/16 \
+    --public-cidr 10.0.1.0/24 --private-cidr 10.0.2.0/24 [--az us-east-1a] [--region us-east-1]
+
+# delete everything again
+python vpc_manager.py destroy --vpc-name my-vpc
+
+# -v before the action shows debug logs
+python vpc_manager.py -v create --vpc-name my-vpc
+```
+
+**What `create` builds** (every resource is tagged `Name=...` and `ManagedBy=vpc_manager`):
+
+```text
+VPC my-vpc (10.0.0.0/16, DNS hostnames on)
+├── Internet Gateway my-vpc-igw (attached)
+├── my-vpc-public-subnet  (10.0.1.0/24, public IP on launch) ── my-vpc-public-rt:  local + 0.0.0.0/0 → IGW
+└── my-vpc-private-subnet (10.0.2.0/24)                      ── my-vpc-private-rt: local only
+```
+
+Both subnets go into the same Availability Zone: `--az`, or the first available one in the region.
+A VPC with the same name that was created by the script is refused, because `destroy` finds the
+VPC by its name. If AWS fails halfway, the error message suggests running `destroy`, which also
+cleans up a half-created setup.
+
+**CIDR validation (bonus).** Before any AWS call, `validate_cidrs()` uses
+`ipaddress.ip_network(cidr, strict=True)` on all three blocks and rejects:
+
+- text that is not a network, and blocks with host bits set (`10.0.0.1/16` instead of `10.0.0.0/16`)
+- IPv6 blocks and prefixes outside AWS's `/16`–`/28` range
+- a subnet that is not inside the VPC (`subnet_of`) and two subnets that overlap (`overlaps`)
+
+A public (non-RFC 1918) VPC range only gives a warning. Errors are shown by argparse
+(`error: VPC CIDR '10.0.0.1/16' is not valid: 10.0.0.1/16 has host bits set`, exit code 2).
+
+**Why `destroy` deletes in this order.** AWS refuses to delete something that another resource
+still depends on and answers with `DependencyViolation`. So for every VPC with the Name tag and
+`ManagedBy=vpc_manager`:
+
+1. detach the Internet Gateway from the VPC (`detach_internet_gateway`)
+2. delete the Internet Gateway (`delete_internet_gateway`)
+3. delete the subnets, which also removes their route table associations, then the custom route
+   tables (the main route table is skipped, AWS deletes it with the VPC)
+4. delete the VPC; its default security group and network ACL go with it
+
+The `ManagedBy` tag means `destroy` never touches a VPC the script did not create, even with the
+same name. Missing pieces (no IGW, no subnets) are skipped, so it also works after a failed
+`create`. If something else still lives in the VPC (an EC2 instance, a NAT gateway), the script
+stops with a clear `DependencyViolation` message.
+
 ### Logging and errors
 
 Every module creates its own logger with `logging.getLogger(__name__)`. Logging is configured only
@@ -1561,6 +1627,14 @@ What is covered:
   confidences, `.JPG` processed, `.mp4` starting a job with the SNS topic and role, other files
   skipped, a finished video job read page by page (`NextToken`) and saved as a summary, a failed job
   not saved, `make_item()` on nested data, and the summary's order
+- `vpc_manager.py` (`tests/test_vpc.py`, fake EC2 client): CIDR validation (valid defaults; text,
+  host bits, `/33`, IPv6, `/8`, `/29`, subnet outside the VPC, overlapping subnets rejected), every
+  resource created and tagged, only the public route table routing `0.0.0.0/0` to the IGW, the AZ
+  from `--az` or the first available one, an existing name refused; `destroy` calls in the safe
+  order (detach IGW → delete IGW → subnets → route tables → VPC), the main route table kept,
+  leftover associations removed, a partial setup, only `ManagedBy=vpc_manager` VPCs searched;
+  argparse errors (no action, no `--vpc-name`, bad CIDR → exit 2 before any AWS call),
+  `DependencyViolation` and "not found" messages
 
 I also tested all commands manually against a real AWS account.
 
